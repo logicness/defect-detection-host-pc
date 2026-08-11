@@ -7,14 +7,16 @@ P1 实时检测页（设计稿图 1）
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QDoubleSpinBox, QSpinBox, QLineEdit, QTabWidget, QTextEdit, QDialog,
-    QGridLayout, QSizePolicy, QFileDialog, QTableWidgetItem, QHeaderView
+    QLineEdit, QTabWidget, QTextEdit, QDialog,
+    QGridLayout, QSizePolicy, QFileDialog, QTableWidgetItem, QHeaderView,
+    QScrollArea
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 
 from components.common_widgets import (
-    Card, KPICard, StatusLight, StyledTable, form_row
+    Card, KPICard, StatusLight, StyledTable, form_row,
+    SpinBox, DoubleSpinBox, FocusComboBox
 )
 from components.image_preview import ImagePreview
 from components.roi_editor import RoiEditDialog
@@ -35,6 +37,8 @@ class RealtimeDetectPage(QWidget):
     local_image_requested = pyqtSignal()
     model_mgr_requested = pyqtSignal()
     load_model_requested = pyqtSignal(str)
+    save_path_changed = pyqtSignal(str)
+    reconnect_requested = pyqtSignal()
     roi_changed = pyqtSignal(list)
 
     def __init__(self, parent=None):
@@ -53,30 +57,43 @@ class RealtimeDetectPage(QWidget):
         top.addLayout(self._build_left(), 3)
         top.addLayout(self._build_center(), 6)
         top.addLayout(self._build_right(), 4)
-        root.addLayout(top, 6)
+        root.addLayout(top, 9)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
         bottom.addLayout(self._build_history(), 5)
         bottom.addLayout(self._build_mid_bottom(), 4)
         bottom.addLayout(self._build_mini_log(), 4)
-        root.addLayout(bottom, 4)
+        root.addLayout(bottom, 1)
 
     # ---------- 左栏 ----------
     def _build_left(self):
+        # 整体垂直布局
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(0)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 滚动区域：包含三个卡片
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setMinimumHeight(400)  # 设置最小高度确保内容可见
+        scroll.setStyleSheet("QScrollArea{background:transparent;} QWidget{background:transparent;}")
+        
         col = QVBoxLayout()
-        col.setSpacing(6)
+        col.setSpacing(4)
 
         cam = Card("相机设置")
-        self.combo_camera = QComboBox()
+        cam.body.setSpacing(4)
+        self.combo_camera = FocusComboBox()
         self.combo_camera.addItems(["相机 01", "相机 02"])
-        self.spin_exposure = QDoubleSpinBox()
+        self.spin_exposure = DoubleSpinBox()
         self.spin_exposure.setRange(0.1, 1000)
         self.spin_exposure.setValue(10.0)
-        self.spin_gain = QDoubleSpinBox()
+        self.spin_gain = DoubleSpinBox()
         self.spin_gain.setRange(0, 48)
         self.spin_gain.setValue(2.0)
-        self.spin_bright = QSpinBox()
+        self.spin_bright = SpinBox()
         self.spin_bright.setRange(0, 255)
         self.spin_bright.setValue(128)
         for lbl, w in (("相机选择", self.combo_camera), ("曝光时间 (ms)", self.spin_exposure),
@@ -85,11 +102,12 @@ class RealtimeDetectPage(QWidget):
         col.addWidget(cam)
 
         det = Card("检测参数")
-        self.spin_conf = QDoubleSpinBox()
+        det.body.setSpacing(4)
+        self.spin_conf = DoubleSpinBox()
         self.spin_conf.setRange(0.05, 1.0)
         self.spin_conf.setSingleStep(0.05)
         self.spin_conf.setValue(0.85)
-        self.spin_area = QSpinBox()
+        self.spin_area = SpinBox()
         self.spin_area.setRange(0, 100000)
         self.spin_area.setValue(50)
         det.body.addLayout(form_row("置信度阈值", self.spin_conf, 160))
@@ -97,14 +115,34 @@ class RealtimeDetectPage(QWidget):
         col.addWidget(det)
 
         roi = Card("ROI设置")
-        self._roi_rows = QVBoxLayout()
-        self._roi_rows.setSpacing(6)
-        roi.body.addLayout(self._roi_rows)
+        roi.body.setSpacing(4)
+        # 用滚动区域包裹 ROI 列表，避免 ROI 多时挤压重叠
+        self._roi_scroll = QScrollArea()
+        self._roi_scroll.setWidgetResizable(True)
+        self._roi_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._roi_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._roi_scroll.setMinimumHeight(150)
+        self._roi_container = QWidget()
+        self._roi_rows = QVBoxLayout(self._roi_container)
+        self._roi_rows.setSpacing(4)
+        self._roi_rows.setContentsMargins(0, 0, 0, 0)
+        self._roi_scroll.setWidget(self._roi_container)
+        self._roi_scroll.setStyleSheet("QScrollArea{background:transparent;} QWidget{background:transparent;}")
+        roi.body.addWidget(self._roi_scroll, 1)  # stretch=1 让滚动区填满卡片剩余空间
         btn_add = QPushButton("添加ROI")
+        btn_add.setFixedHeight(34)
+        btn_add.setStyleSheet("font-size:16px;")
         btn_add.clicked.connect(self._add_roi)
         roi.body.addWidget(btn_add)
-        col.addWidget(roi)
+        col.addWidget(roi, 1)  # ROI 卡片弹性伸展，占据剩余空间
+        
+        # 创建容器 widget 并设置布局
+        container = QWidget()
+        container.setLayout(col)
+        scroll.setWidget(container)
+        left_layout.addWidget(scroll, 1)  # 滚动区域占据剩余空间
 
+        # 四个按钮固定在底部，不滚动
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(12, 0, 0, 0)
         self.btn_start = QPushButton("▶  开始检测")
@@ -117,7 +155,7 @@ class RealtimeDetectPage(QWidget):
         self.btn_stop.clicked.connect(self.stop_requested)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_stop)
-        col.addLayout(btn_row)
+        left_layout.addLayout(btn_row)
 
         btn_row2 = QHBoxLayout()
         btn_row2.setContentsMargins(12, 0, 0, 0)
@@ -129,9 +167,9 @@ class RealtimeDetectPage(QWidget):
         self.btn_save.clicked.connect(self._on_save_image)
         btn_row2.addWidget(self.btn_local_image)
         btn_row2.addWidget(self.btn_save)
-        col.addLayout(btn_row2)
-        col.addStretch()
-        return col
+        left_layout.addLayout(btn_row2)
+        
+        return left_layout
 
     # ---------- 中部预览 ----------
     def _build_center(self):
@@ -140,6 +178,7 @@ class RealtimeDetectPage(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(6)
         self.preview = ImagePreview()
+        self.preview.roi_edited.connect(self._on_preview_roi_edited)
 
         def tbtn(txt, tip, cb, w=34):
             b = QPushButton(txt)
@@ -184,22 +223,51 @@ class RealtimeDetectPage(QWidget):
             kpi.addWidget(k)
         card.body.addLayout(kpi)
 
-        card.body.addWidget(_lbl("当前结果详情"))
+        # 标题加大加粗
+        title = QLabel("当前结果详情")
+        title.setStyleSheet(
+            "color:#f1f5f9; font-size:18px; font-weight:700; background:transparent;")
+        card.body.addWidget(title)
         self.detail_table = StyledTable(["项目", "值"])
         self.detail_table.horizontalHeader().setVisible(False)
-        self.detail_table.setColumnWidth(0, 90)
+        self.detail_table.setColumnWidth(0, 120)
+        self.detail_table.verticalHeader().setDefaultSectionSize(42)  # 行高加大
+        self.detail_table.setWordWrap(True)  # 多缺陷类型文本自动换行
+        from PyQt5.QtGui import QFont
         self._detail_rows = {}
         for key in ("产品", "结果", "缺陷类型", "面积 (px)", "置信度", "时间", "图像路径"):
             row = self.detail_table.rowCount()
             self.detail_table.insertRow(row)
             k = QTableWidgetItem(key)
-            k.setForeground(QColor("#94a3b8"))
+            k.setForeground(QColor("#a5b4c8"))
+            f = QFont()
+            f.setPointSize(11)
+            f.setBold(True)
+            k.setFont(f)
             self.detail_table.setItem(row, 0, k)
             v = QTableWidgetItem("--")
+            vf = QFont()
+            vf.setPointSize(12)
+            vf.setBold(True)
+            v.setFont(vf)
+            v.setForeground(QColor("#f1f5f9"))
+            v.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.detail_table.setItem(row, 1, v)
+            # 缺陷类型行突出显示（更大更亮，支持多类型换行）
+            if key == "缺陷类型":
+                k.setForeground(QColor("#e2e8f0"))
+                kf = QFont()
+                kf.setPointSize(12)
+                kf.setBold(True)
+                k.setFont(kf)
+                vf2 = QFont()
+                vf2.setPointSize(14)
+                vf2.setBold(True)
+                v.setFont(vf2)
+                self.detail_table.setRowHeight(row, 52)
             self._detail_rows[key] = v
         self.detail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.detail_table.setColumnWidth(0, 110)
+        self.detail_table.setColumnWidth(0, 120)
         card.body.addWidget(self.detail_table, stretch=1)
         col.addWidget(card, stretch=1)
         return col
@@ -219,17 +287,33 @@ class RealtimeDetectPage(QWidget):
         col.setSpacing(10)
 
         comm = Card("通信设置")
+        # 下位机（推理服务）连接状态 + 手动重连
+        inf_row = QHBoxLayout()
+        inf_row.setSpacing(8)
+        inf_lbl = QLabel("下位机(推理)")
+        inf_lbl.setStyleSheet("color:#cbd5e1; font-size:16px; background:transparent;")
+        inf_lbl.setFixedWidth(160)
+        self.light_nano_mini = StatusLight("未连接")
+        btn_reconnect = QPushButton("重新连接")
+        btn_reconnect.setFixedHeight(32)
+        btn_reconnect.setStyleSheet("font-size:15px;")
+        btn_reconnect.clicked.connect(self.reconnect_requested)
+        inf_row.addWidget(inf_lbl)
+        inf_row.addWidget(self.light_nano_mini)
+        inf_row.addStretch()
+        inf_row.addWidget(btn_reconnect)
+        comm.body.addLayout(inf_row)
         self.comm_tabs = QTabWidget()
         plc_tab = QWidget()
         pl = QVBoxLayout(plc_tab)
         pl.setContentsMargins(6, 6, 6, 6)
-        self.combo_proto = QComboBox()
+        self.combo_proto = FocusComboBox()
         self.combo_proto.addItems(["Modbus TCP"])
         self.edit_plc_ip = QLineEdit("192.168.1.200")
-        self.spin_plc_port = QSpinBox()
+        self.spin_plc_port = SpinBox()
         self.spin_plc_port.setRange(1, 65535)
         self.spin_plc_port.setValue(2000)
-        self.spin_plc_hb = QSpinBox()
+        self.spin_plc_hb = SpinBox()
         self.spin_plc_hb.setRange(100, 10000)
         self.spin_plc_hb.setValue(500)
         self.light_plc_mini = StatusLight("已连接")
@@ -250,14 +334,23 @@ class RealtimeDetectPage(QWidget):
         store = Card("存储设置")
         self.edit_save_path = QLineEdit("D:/Inspect/Images")
         self.edit_save_path.setReadOnly(True)
-        self.combo_clean = QComboBox()
+        btn_browse = QPushButton("…")
+        btn_browse.setObjectName("iconBtn")
+        btn_browse.setFixedSize(36, 28)
+        btn_browse.setToolTip("选择保存目录")
+        btn_browse.clicked.connect(self._browse_save)
+        save_brow = QHBoxLayout()
+        save_brow.setSpacing(4)
+        save_brow.addWidget(self.edit_save_path, 1)
+        save_brow.addWidget(btn_browse)
+        self.combo_clean = FocusComboBox()
         self.combo_clean.addItems(["磁盘空间 < 10% 时删除", "保留最近 30 天", "不清理"])
-        store.body.addLayout(form_row("保存路径", self.edit_save_path, 70))
+        store.body.addLayout(form_row("保存路径", save_brow, 70))
         store.body.addLayout(form_row("自动清理", self.combo_clean, 70))
         row.addWidget(store)
 
         model = Card("模型设置")
-        self.combo_model = QComboBox()
+        self.combo_model = FocusComboBox()
         self.combo_model.addItems(["Product_A_v1"])
         btn_load = QPushButton("加载模型")
         btn_load.clicked.connect(
@@ -295,18 +388,47 @@ class RealtimeDetectPage(QWidget):
             self.combo_model.addItem(name)
         self.combo_model.setCurrentText(name)
 
+    def set_running(self, running: bool):
+        """同步开始/停止按钮的启用状态和显示文本，避免用户重复启动"""
+        self.btn_start.setEnabled(not running)
+        self.btn_stop.setEnabled(running)
+        self.btn_start.setText("● 检测中..." if running else "▶  开始检测")
+
+    def _on_preview_roi_edited(self, idx: int, roi: dict):
+        if 0 <= idx < len(self._rois):
+            self._rois[idx] = roi
+            self.preview.set_rois(self._rois)
+            self.roi_changed.emit(self._rois)
+
+    def _browse_save(self):
+        d = QFileDialog.getExistingDirectory(self, "选择保存目录", self.edit_save_path.text())
+        if d:
+            self.edit_save_path.setText(d)
+            self.save_path_changed.emit(d)
+
     def get_rois(self) -> list:
         return self._rois
 
     def _rebuild_roi_rows(self):
+        # 清除所有项目（包括弹簧）
         while self._roi_rows.count():
             item = self._roi_rows.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+        # 重建 ROI 行
         for i, roi in enumerate(self._rois):
             row = QHBoxLayout()
-            row.addWidget(_lbl(f"ROI {i + 1}"))
-            combo = QComboBox()
+            row.setSpacing(8)
+            lbl = QLabel(f"ROI {i + 1}")
+            lbl.setStyleSheet("color:#cbd5e1; font-size:18px; background:transparent;")
+            lbl.setFixedWidth(160)
+            row.addWidget(lbl)
+            combo = FocusComboBox()
             combo.addItems(["启用", "禁用"])
             combo.setCurrentIndex(0 if roi.get("enabled", True) else 1)
             combo.currentIndexChanged.connect(
@@ -314,15 +436,17 @@ class RealtimeDetectPage(QWidget):
             row.addWidget(combo, 1)
             be = QPushButton("编辑")
             be.setObjectName("iconBtn")
-            be.setFixedSize(40, 26)
+            be.setFixedSize(48, 30)
             be.clicked.connect(lambda _=False, r=roi: self._edit_roi(r))
             bd = QPushButton("删除")
             bd.setObjectName("iconBtn")
-            bd.setFixedSize(40, 26)
+            bd.setFixedSize(48, 30)
             bd.clicked.connect(lambda _=False, r=roi: self._del_roi(r))
             row.addWidget(be)
             row.addWidget(bd)
             self._roi_rows.addLayout(row)
+        # 底部弹簧，让 ROI 顶对齐
+        self._roi_rows.addStretch()
 
     def _on_roi_toggle(self, roi, enabled: bool):
         roi["enabled"] = enabled
@@ -344,8 +468,11 @@ class RealtimeDetectPage(QWidget):
             self.roi_changed.emit(self._rois)
 
     def _add_roi(self):
-        self._rois.append({"name": f"ROI {len(self._rois) + 1}", "enabled": True,
-                           "x": 100, "y": 100, "w": 200, "h": 200})
+        n = len(self._rois)
+        # 每个新 ROI 偏移 60px，避免全部叠在同一位置
+        offset = n * 60
+        self._rois.append({"name": f"ROI {n + 1}", "enabled": True,
+                           "x": 80 + offset, "y": 80 + offset, "w": 200, "h": 200})
         self._rebuild_roi_rows()
         self.preview.set_rois(self._rois)
         self.roi_changed.emit(self._rois)

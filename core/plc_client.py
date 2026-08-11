@@ -171,6 +171,7 @@ class PLCClient(QObject):
     # ---------------- 后台轮询 ----------------
     def _loop(self):
         retry = 0
+        last_ok_ts = 0.0  # 上次连接成功时间（「秒断」风暴防护）
         while self._running:
             if not self._connected:
                 try:
@@ -182,6 +183,7 @@ class PLCClient(QObject):
                         self._sock = sock
                     self._connected = True
                     retry = 0
+                    last_ok_ts = time.time()
                     self.connected.emit()
                     self.log_message.emit("INFO", "PLC 连接成功")
                 except OSError as e:
@@ -207,5 +209,8 @@ class PLCClient(QObject):
                         self._sock = None
                 self.disconnected.emit()
                 self.log_message.emit("WARN", f"PLC 通信异常: {e}，重连中...")
+                # 「秒断」防护：连接成功但立刻通信异常 → 退避，避免快速重连风暴
+                if last_ok_ts and time.time() - last_ok_ts < 2.0:
+                    time.sleep(self.retry_delay)
                 continue
             time.sleep(self.poll_interval)

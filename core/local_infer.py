@@ -57,7 +57,10 @@ class LocalInferEngine(QObject):
     # ---------- 后台线程 ----------
     def _worker(self, image_path, model_path, conf_thres, iou_thres):
         try:
-            img = cv2.imread(image_path)
+            # cv2.imread 不支持中文路径，用 np.fromfile + imdecode 替代
+            import numpy as np
+            raw = np.fromfile(image_path, dtype=np.uint8)
+            img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
             if img is None:
                 raise RuntimeError(f"无法读取图片: {image_path}")
 

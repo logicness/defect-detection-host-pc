@@ -24,6 +24,7 @@ from pages import (
 from core.controller import AppController
 from core.frame_source import SimFrameSource
 from core.stream_engine import StreamEngine
+from core.model_manager_ctl import ModelManagerCtl
 from core.ng_saver import NGSaver
 from core import config as cfg_mod
 
@@ -57,12 +58,28 @@ class MainWindow(QMainWindow):
         # 核心对象
         self.cfg = cfg_mod.load_config()
         self.controller = AppController()
+        self.model_ctl = ModelManagerCtl(self.controller.tcp)
         self.stream_engine = StreamEngine(infer_mode="sim")
         self.ng_saver = NGSaver(self.cfg.get("storage", {}).get(
             "save_path", "D:/Inspect/Images"))
         self._last_frame = None
         self._plc_running = False
-        self._local_model = ""   # 本地模型路径（.onnx/.pt），非空时优先本地推理
+        # 本地图片模式：加载图片后直接显示在预览区，点「开始检测」做单帧推理
+        self._local_image = None          # numpy BGR 帧
+        self._local_image_path = ""       # 图片路径
+        self._local_image_active = False  # 是否正处于本地图片模式
+        self._nano_active = False         # 是否检测到开发板通信（自动切换开发板模型）
+        # 从配置恢复上次本地模型（必须是存在的 .onnx/.pt 模型文件）
+        self._local_model = self.cfg.get("state", {}).get("last_local_model", "")
+        if self._local_model and not (
+                os.path.isfile(self._local_model) and
+                self._local_model.lower().endswith((".onnx", ".pt"))):
+            self._local_model = ""
+        # 没有本地模型时，自动探测 nano 模型训练目录中的默认缺陷检测模型
+        if not self._local_model:
+            self._local_model = self._find_default_local_model()
+            if self._local_model:
+                self._save_state(last_local_model=self._local_model)
 
         # 5 个 Tab
         self.tab = QTabWidget()
@@ -101,6 +118,12 @@ class MainWindow(QMainWindow):
         self.page_realtime.set_rois(self._rois)
         self.page_param.set_rois(self._rois)
 
+        # 恢复上次本地模型到界面
+        if self._local_model:
+            self.title_bar.set_model_tag(os.path.basename(self._local_model))
+            self.page_param.set_cur_model(os.path.basename(self._local_model))
+            self.page_realtime.set_cur_model(os.path.basename(self._local_model))
+
         self._wire()
         self._emit_startup_logs()
         self._auto_connect()
@@ -125,12 +148,26 @@ class MainWindow(QMainWindow):
         # 状态灯
         c.status_changed.connect(self._on_status_changed)
 
+        # TCP 调试日志（写文件便于诊断 pythonw 无控制台场景）
+        c.tcp.log_message.connect(self._log_tcp_debug)
+        c.tcp.connected.connect(lambda: self._log_tcp_debug("INFO", "SIGNAL connected"))
+        c.tcp.disconnected.connect(lambda: self._log_tcp_debug("INFO", "SIGNAL disconnected"))
+
+        # 开发板通信识别 → 自动切换模型（连接切开发板模型 / 断开切回本地模型）
+        c.tcp.connected.connect(self._on_nano_connected)
+        c.tcp.disconnected.connect(self._on_nano_disconnected)
+
+        # 模型管理（下位机清单/切换 → 标题栏与页面联动）
+        self.model_ctl.models_updated.connect(self._on_models_updated)
+        self.model_ctl.load_result.connect(self._on_model_load_result)
+
         # 实时流
         self.stream_engine.frame_ready.connect(self._on_stream_frame)
         self.stream_engine.result_received.connect(
             lambda r: c.ingest_result(r.get("detections", []), r.get("frame")))
         self.stream_engine.log_message.connect(
             lambda lv, m: c.log_message.emit(lv, "检测", m))
+        self.stream_engine.state_changed.connect(self.page_realtime.set_running)
 
         # 推理结果 → 实时页/历史页/通信页
         c.detection_result.connect(self._on_detection_result)
@@ -140,9 +177,12 @@ class MainWindow(QMainWindow):
         self.page_realtime.start_requested.connect(self._on_start)
         self.page_realtime.stop_requested.connect(self._on_stop)
         self.page_realtime.save_image_requested.connect(self._on_save_image)
+        self.page_realtime.local_image_requested.connect(self._on_local_image)
         self.page_realtime.roi_changed.connect(self._on_roi_changed)
         self.page_realtime.load_model_requested.connect(self._on_load_model)
         self.page_realtime.model_mgr_requested.connect(self._on_model_mgr)
+        self.page_realtime.save_path_changed.connect(self._on_save_path_changed)
+        self.page_realtime.reconnect_requested.connect(self._on_tcp_reconnect)
 
         # 参数页
         self.page_param.params_apply_requested.connect(self._on_params_apply)
@@ -161,18 +201,55 @@ class MainWindow(QMainWindow):
         self.page_comm.test_comm_requested.connect(self._on_test_comm)
         c.plc.status_updated.connect(self._on_plc_status)
 
+    # ================= 默认本地模型 =================
+    def _find_default_local_model(self) -> str:
+        """在 nano 模型训练目录中探测默认本地缺陷检测模型（NEU-DET 类别）"""
+        candidates = [
+            # NEU-DET 训练产物（类别: crazing/inclusion/patches/pitted_surface/rolled-in_scale/scratches）
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs\neu_yolov8s_e1003\weights\best.onnx",
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs\neu_yolov8s_e1003\weights\best.pt",
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs\neu_fixed_v8s\weights\best.pt",
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs\detect\guangdong_cam_v1\weights\best.pt",
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\yolov8s.pt",
+            r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\NEU-DET-with-yolov8-main\yolov8s.pt",
+        ]
+        for p in candidates:
+            if os.path.isfile(p) and p.lower().endswith((".onnx", ".pt")):
+                return p
+        # 兜底：递归扫描 runs 目录下最近的 best 模型
+        base = r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs"
+        best_found = None
+        latest = 0.0
+        if os.path.isdir(base):
+            for root, _dirs, files in os.walk(base):
+                for f in files:
+                    if f in ("best.onnx", "best.pt"):
+                        full = os.path.join(root, f)
+                        if "_trash_" in full:
+                            continue
+                        mtime = os.path.getmtime(full)
+                        if mtime > latest:
+                            latest, best_found = mtime, full
+        return best_found or ""
+
     # ================= 启动 =================
     def _emit_startup_logs(self):
-        for lv, mod, msg in [
-                ("INFO", "系统", "软件启动"),
-                ("INFO", "系统", "配置文件加载完成"),
-                ("INFO", "相机", "相机初始化完成"),
-                ("INFO", "相机", "相机 Camera_01 连接成功"),
-                ("INFO", "模型", "模型 Product_A_v1 加载完成"),
-                ("INFO", "系统", "所有模块初始化完成，进入运行状态")]:
+        msgs = [
+            ("INFO", "系统", "软件启动"),
+            ("INFO", "系统", "配置文件加载完成"),
+        ]
+        if self._local_model and os.path.isfile(self._local_model):
+            msgs.append(
+                ("INFO", "模型",
+                 f"默认本地模型: {os.path.basename(self._local_model)}（选择本地图片即可检测）"))
+            msgs.append(("INFO", "模型", "连接开发板后将自动切换为开发板模型"))
+        else:
+            msgs.append(("INFO", "系统", "等待连接设备或加载本地图片"))
+        for lv, mod, msg in msgs:
             self.controller.log_message.emit(lv, mod, msg)
 
     def _auto_connect(self):
+        """启动时自动连接下位机（开发板可能后开机，失败后会持续后台重连）"""
         t = self.cfg.get("tcp", {})
         self.controller.configure_tcp(
             t.get("host", "192.168.1.101"), t.get("port", 8888),
@@ -192,35 +269,175 @@ class MainWindow(QMainWindow):
 
     # ================= 检测流 =================
     def _on_start(self):
+        # 如果实时流已经在跑，这次点击视为「停止」请求，避免重复启动多条流
         if self.stream_engine.is_running:
+            self._on_stop()
             return
-        tcp_on = self.controller.tcp.is_connected
+
+        # 只要已加载本地图片，就优先做单帧推理（用户选图后的预期行为）
+        if self._local_image is not None:
+            self.stream_engine.stop()
+            self._local_image_active = True
+            self._detect_local_image()
+            return
+
+        # 标记为实时流模式，清除本地图片模式
+        self._local_image_active = False
+
+        # 开发板已连接且自动切换生效：走 TCP 推理
+        tcp_on = self.controller.tcp.is_connected and self._nano_active
         if tcp_on:
-            mode = "tcp"
             self.stream_engine.set_infer_callback(self._tcp_infer)
-        elif self._local_model:
-            mode = "local"
+            self.stream_engine.infer_mode = "tcp"
+            self.stream_engine.set_frame_source(SimFrameSource())
+            self.stream_engine.start()
+            self.page_realtime.set_running(True)
+            self.controller.log_message.emit("INFO", "检测", "开始检测（下位机推理）")
         else:
-            mode = "sim"
-        self.stream_engine.infer_mode = mode
-        if mode == "local":
-            self.stream_engine.set_local_model(self._local_model)
-        self.stream_engine.set_frame_source(SimFrameSource())
-        self.stream_engine.start()
-        self.controller.log_message.emit(
-            "INFO", "检测", "开始检测（" +
-            ("下位机推理" if mode == "tcp"
-             else ("本地模型推理" if mode == "local" else "本地模拟推理")) + "）")
+            # 没有连接下位机：明确提示，不再用模拟演示
+            self.controller.log_message.emit(
+                "WARN", "检测", "未连接下位机，无法开始实时检测")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "开始检测",
+                    "当前未连接下位机，无法开始实时检测。\n\n"
+                    "请进行以下操作之一：\n"
+                    "1. 连接下位机并等待状态栏「模型」变绿\n"
+                    "2. 点击「本地图片」选择一张图片进行单张检测")
 
     def _tcp_infer(self, frame):
         ok, buf = cv2.imencode(".jpg", frame)
         if ok:
             self.controller.send_image(buf.tobytes())
 
-    def _on_stop(self):
+    @staticmethod
+    def _is_torchscript_model(path: str) -> bool:
+        """检测 .pt 文件是否为 TorchScript 格式（无法直接用 YOLO 推理）"""
+        # 文件名是最快的判断方式
+        if "torchscript" in os.path.basename(path).lower():
+            return True
+        try:
+            import torch
+            # TorchScript 模型用 torch.jit.load 能直接加载
+            # 普通 PyTorch 权重用 torch.load 会加载为 dict/OrderedDict
+            m = torch.jit.load(path, map_location="cpu")
+            # 如果能加载且类型是 ScriptModule / RecursiveScriptModule，即为 TorchScript
+            return "ScriptModule" in type(m).__name__
+        except Exception:
+            return False
+
+    def _detect_local_image(self):
+        """对本地图片做单帧推理：必须有有效的 .onnx/.pt 本地模型，否则弹窗提示"""
+        # 确保不跟实时流同时跑
         if self.stream_engine.is_running:
             self.stream_engine.stop()
+        frame = self._local_image
+        path = self._local_image_path
+        t0 = time.perf_counter()
+        basename = os.path.basename(path)
+
+        # 没有本地模型
+        if not self._local_model:
+            self.controller.log_message.emit(
+                "WARN", "检测", "未设置本地模型，无法检测本地图片")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "本地图片检测",
+                    "当前未设置 PC 本地模型。\n\n"
+                    "请先到「模型管理」或点击「加载模型」选择 .onnx / .pt 模型，\n"
+                    "然后再进行本地图片检测。")
+            return
+
+        # 模型文件不存在
+        if not os.path.isfile(self._local_model):
+            self.controller.log_message.emit(
+                "WARN", "检测", f"本地模型文件不存在: {self._local_model}")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.warning(
+                    self, "本地图片检测",
+                    f"模型文件不存在或已被删除:\n{self._local_model}\n\n"
+                    "请重新选择本地模型。")
+            return
+
+        ext = os.path.splitext(self._local_model)[1].lower()
+        # 格式不支持
+        if ext not in (".onnx", ".pt"):
+            self.controller.log_message.emit(
+                "WARN", "检测",
+                f"本地模型格式 {ext} 暂不支持，请使用 .onnx / .pt 模型")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "本地图片检测",
+                    f"当前本地模型:\n{self._local_model}\n\n"
+                    f"格式 {ext} 暂不支持 PC 本地推理。\n"
+                    "请加载 .onnx 或 .pt 模型后再检测。")
+            return
+
+        # 真实本地推理
+        try:
+            if ext == ".onnx":
+                from core.local_infer import load_session, infer_frame
+                session = load_session(self._local_model)
+                dets = infer_frame(session, frame, 0.25, 0.45)
+            else:
+                # 先排除 TorchScript 模型（文件名含 torchscript 或加载后类型不符）
+                if self._is_torchscript_model(self._local_model):
+                    self.controller.log_message.emit(
+                        "WARN", "检测",
+                        f"TorchScript 模型暂不支持本地推理: {os.path.basename(self._local_model)}")
+                    if QApplication.platformName() != "offscreen":
+                        QMessageBox.warning(
+                            self, "本地图片检测",
+                            f"当前模型是 TorchScript 格式：\n{self._local_model}\n\n"
+                            "该格式无法直接用于 PC 本地推理。\n\n"
+                            "请使用以下方式之一解决：\n"
+                            "1. 换成标准的 PyTorch 训练权重 (.pt)\n"
+                            "2. 导出为 ONNX 格式 (.onnx) 后加载\n\n"
+                            "例如：python export.py --weights yolov5s.pt --include onnx")
+                    return
+                from ultralytics import YOLO
+                model = YOLO(self._local_model)
+                results = model.predict(frame, conf=0.25, iou=0.45,
+                                        verbose=False, imgsz=640, device="cpu")
+                r = results[0]
+                dets = []
+                if r.boxes is not None and len(r.boxes) > 0:
+                    boxes = r.boxes.xyxy.cpu().numpy()
+                    confs = r.boxes.conf.cpu().numpy()
+                    cls_ids = r.boxes.cls.cpu().numpy().astype(int)
+                    from core.local_infer import NEU_CLASSES
+                    for box, c, ci in zip(boxes, confs, cls_ids):
+                        cls = NEU_CLASSES[ci] if ci < len(NEU_CLASSES) else f"cls{ci}"
+                        dets.append((cls, float(c), *[float(v) for v in box]))
+        except Exception as e:
+            self.controller.log_message.emit(
+                "ERROR", "检测", f"本地推理失败: {e}")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.warning(
+                    self, "本地图片检测",
+                    f"模型推理时出错:\n{e}\n\n"
+                    "请检查模型文件是否完整，或尝试其他 .onnx / .pt 模型。")
+            return
+
+        ms = (time.perf_counter() - t0) * 1000
+        # 交给 controller 统一入管线（KPI/写库/历史/预览画框）
+        self.controller.ingest_result(dets, frame, path)
+        self.controller.log_message.emit(
+            "INFO", "检测",
+            f"本地图片检测完成: {basename} "
+            f"({'NG 缺陷×' + str(len(dets)) if dets else 'OK'})  耗时 {ms:.0f} ms")
+        self.status_left.setText(
+            f"本地图片: {basename}　| 检测完成 {ms:.0f} ms")
+
+    def _on_stop(self):
+        """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
+        if self.stream_engine.is_running:
+            self.stream_engine.stop()
+        self.page_realtime.set_running(False)
         self.controller.log_message.emit("INFO", "检测", "检测已停止")
+        if self._local_image_active and self._local_image is not None:
+            self.status_left.setText(
+                f"本地图片: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
 
     def _on_stream_frame(self, frame):
         self._last_frame = frame
@@ -248,10 +465,20 @@ class MainWindow(QMainWindow):
 
         # 右侧详情 + KPI
         first = dets[0] if dets else None
-        area = int(abs((first[4] - first[2]) * (first[5] - first[3]))) if first else 0
+        if dets:
+            # 汇总缺陷类型及数量：inclusion ×1, scratches ×2
+            from collections import Counter
+            cnt = Counter(d[0] for d in dets)
+            type_str = ", ".join(f"{cls} ×{n}" for cls, n in cnt.items())
+            # 取面积最大的缺陷框作为代表（面积/置信度）
+            biggest = max(dets, key=lambda d: abs((d[4] - d[2]) * (d[5] - d[3])))
+            area = int(abs((biggest[4] - biggest[2]) * (biggest[5] - biggest[3])))
+            conf = f"{biggest[1]:.2f}"
+        else:
+            type_str, area, conf = "-", 0, "--"
         self.page_realtime.update_detail(
-            "Product_A_v1", verdict, first[0] if first else "-",
-            area, f"{first[1]:.2f}" if first else "--", ts,
+            "Product_A_v1", verdict, type_str,
+            area, conf, ts,
             path or "C:/data/images/sample.png")
         st = self.controller.get_stats()
         yld = st["pass"] / st["total"] * 100 if st["total"] else 0
@@ -284,14 +511,29 @@ class MainWindow(QMainWindow):
             "ERROR", "检测", f"连续 {count} 次检出缺陷，请检查产线状态！")
         if QApplication.platformName() == "offscreen":
             return  # 无头模式不弹窗
-        box = QMessageBox(self)
-        box.setWindowTitle("连续 NG 告警")
+
+        # 避免弹窗堆叠：复用同一个非模态告警框，5 分钟内不重复新建
+        now = time.time()
+        cooldown = getattr(self, "_ng_alarm_cooldown", 0)
+        if now < cooldown:
+            return
+
+        box = getattr(self, "_ng_alarm_box", None)
+        if box is None:
+            box = QMessageBox(self)
+            box.setWindowTitle("连续 NG 告警")
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowModality(Qt.NonModal)
+            box.setStandardButtons(QMessageBox.Ok)
+            box.finished.connect(lambda _: setattr(self, "_ng_alarm_box", None))
+            self._ng_alarm_box = box
+
         box.setText(f"连续检出 {count} 个缺陷！")
         box.setInformativeText("可能原因：产线异常 / 相机失焦 / 光源异常，请立即检查。")
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowModality(Qt.NonModal)
         box.show()
-        self._ng_alarm_box = box  # 保留引用防回收
+        box.raise_()
+        box.activateWindow()
+        self._ng_alarm_cooldown = now + 300  # 5 分钟冷却
 
     # ================= 配置/ROI =================
     def _sync_cfg_to_realtime(self):
@@ -316,6 +558,9 @@ class MainWindow(QMainWindow):
             self.page_realtime.set_rois(rois)
         if sender is not self.page_param:
             self.page_param.set_rois(rois)
+        # 持久化 ROI 变更
+        self.cfg["rois"] = rois
+        cfg_mod.save_config(self.cfg)
 
     def _on_save_config(self, cfg: dict):
         merged = dict(self.cfg)
@@ -333,6 +578,13 @@ class MainWindow(QMainWindow):
         self.page_realtime.set_rois(self.cfg["rois"])
         self.page_param.set_rois(self.cfg["rois"])
         self.controller.log_message.emit("INFO", "系统", "已恢复默认配置")
+
+    def _on_save_path_changed(self, path: str):
+        self.cfg.setdefault("storage", {})["save_path"] = path
+        cfg_mod.save_config(self.cfg)
+        self.ng_saver.set_save_root(path)
+        self.page_param.apply_config(self.cfg)
+        self.controller.log_message.emit("INFO", "系统", f"保存路径已更新: {path}")
 
     def _on_params_apply(self, conf, iou):
         rois = [{"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
@@ -367,9 +619,70 @@ class MainWindow(QMainWindow):
 
     def _on_model_mgr(self):
         from components.model_manager_dialog import ModelManagerDialog
-        dlg = ModelManagerDialog(self.controller.tcp, self)
+        dlg = ModelManagerDialog(
+            self.controller.tcp, self,
+            default_model=self._local_model,
+            default_model_dir=self.cfg.get("state", {}).get("last_model_dir", "")
+        )
         dlg.local_model_selected.connect(self._on_local_model_selected)
+        dlg.reconnect_requested.connect(self._on_model_mgr_reconnect)
         dlg.exec_()
+
+    def _on_models_updated(self, data):
+        """下位机模型清单变化 → 同步标题栏/页面当前模型"""
+        active = data.get("active", "")
+        if not active:
+            return
+        base = os.path.basename(active)
+        self.title_bar.set_model_tag(base)
+        self.page_realtime.set_cur_model(base)
+        self.page_param.set_cur_model(base)
+        self.controller.log_message.emit("INFO", "模型", f"下位机当前模型: {base}")
+        # 记忆 Nano 当前模型
+        self._save_state(last_nano_model=active)
+
+    def _on_model_load_result(self, payload):
+        """下位机模型切换结果 → 同步标题栏/页面"""
+        if not payload.get("ok"):
+            self.controller.log_message.emit(
+                "WARN", "模型", f"切换失败: {payload.get('error', '')}")
+            return
+        model = payload.get("model", "")
+        base = os.path.basename(model)
+        self.title_bar.set_model_tag(base)
+        self.page_realtime.set_cur_model(base)
+        self.page_param.set_cur_model(base)
+        self.controller.log_message.emit("INFO", "模型", f"模型切换成功: {base}")
+        # 记忆 Nano 当前模型
+        self._save_state(last_nano_model=model)
+
+    def _on_nano_connected(self):
+        """检测到开发板通信 → 自动切换为开发板模型"""
+        self._nano_active = True
+        nano_model = self.cfg.get("state", {}).get("last_nano_model", "")
+        base = os.path.basename(nano_model) if nano_model else "Nano 模型"
+        self.title_bar.set_model_tag(base)
+        self.page_realtime.set_cur_model(base)
+        self.page_param.set_cur_model(base)
+        self.controller.log_message.emit(
+            "INFO", "模型", f"检测到开发板通信，已切换为开发板模型: {base}")
+        self.status_left.setText(f"开发板已连接　|　模型: {base}")
+
+    def _on_nano_disconnected(self):
+        """开发板断开 → 自动切回本地模型"""
+        self._nano_active = False
+        if self._local_model and os.path.isfile(self._local_model):
+            base = os.path.basename(self._local_model)
+            self.title_bar.set_model_tag(base)
+            self.page_realtime.set_cur_model(base)
+            self.page_param.set_cur_model(base)
+            self.controller.log_message.emit(
+                "INFO", "模型", f"开发板已断开，切回本地模型: {base}")
+        else:
+            self.title_bar.set_model_tag("--")
+            self.controller.log_message.emit("INFO", "模型", "开发板已断开，无本地模型")
+        if not self.stream_engine.is_running:
+            self.status_left.setText("就绪　|　检测帧率: -- FPS")
 
     def _on_local_model_selected(self, path):
         import os
@@ -379,6 +692,16 @@ class MainWindow(QMainWindow):
         self.title_bar.set_model_tag(os.path.basename(path))
         self.page_param.set_cur_model(os.path.basename(path))
         self.page_realtime.set_cur_model(os.path.basename(path))
+        # 持久化
+        self._save_state(last_local_model=path,
+                         last_model_dir=os.path.dirname(path) or "")
+
+    def _save_state(self, **kwargs):
+        """更新并保存 ui_state 到配置文件"""
+        state = dict(self.cfg.get("state", {}))
+        state.update(kwargs)
+        self.cfg["state"] = state
+        cfg_mod.save_config(self.cfg)
 
     # ================= 历史 =================
     def _on_history_query(self, filters, limit, offset):
@@ -427,6 +750,34 @@ class MainWindow(QMainWindow):
         else:
             self.controller.log_message.emit("WARN", "PLC", "PLC 未连接，无法测试")
 
+    def _on_tcp_reconnect(self):
+        """手动重新连接下位机推理服务（断开旧线程后立即重连）"""
+        self.controller.tcp.disconnect()
+        t = self.cfg.get("tcp", {})
+        self.controller.configure_tcp(
+            t.get("host", "192.168.1.101"), t.get("port", 8888),
+            heartbeat=t.get("heartbeat", 5), retries=t.get("retries", 3),
+            timeout=t.get("timeout", 10))
+        self.controller.connect_tcp()
+        self.controller.log_message.emit(
+            "INFO", "通信", f"正在重新连接下位机 {t.get('host', '192.168.1.101')}:{t.get('port', 8888)}...")
+
+    def _on_model_mgr_reconnect(self):
+        """模型管理对话框里的重新连接按钮"""
+        self._on_tcp_reconnect()
+
+    def _log_tcp_debug(self, level, msg):
+        """把 TCP 相关日志追加到文件，便于 pythonw 无控制台时排查"""
+        import os, time
+        try:
+            path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "data", "tcp_debug.log")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} [{level}] {msg}\n")
+        except Exception:
+            pass
+
     def _on_status_changed(self, name, status):
         bar = {"camera": self.title_bar.light_camera,
                "plc": self.title_bar.light_plc,
@@ -436,8 +787,12 @@ class MainWindow(QMainWindow):
         if name == "plc":
             self.page_comm.set_plc_conn_ui(status == 1)
             self.page_realtime.set_plc_light(status == 1)
-        if name == "model" and status == 1:
-            self.controller.tcp.request_model_list()
+        if name == "model":
+            # 同步实时页下位机状态灯
+            self.page_realtime.light_nano_mini.set_status(
+                status, "已连接" if status == 1 else "未连接")
+            if status == 1:
+                self.controller.tcp.request_model_list()
 
     # ================= 杂项 =================
     def _on_save_image(self, path):
@@ -459,14 +814,11 @@ class MainWindow(QMainWindow):
             " font-size: 15px; padding: 4px; }"
             "QMenu::item { padding: 8px 24px; border-radius: 4px; }"
             "QMenu::item:selected { background-color: #2563eb; color: #ffffff; }")
-        act_image = menu.addAction("本地图片检测")
         act_model = menu.addAction("模型管理")
         menu.addSeparator()
         act_about = menu.addAction("关于")
         act = menu.exec_(self.title_bar.mapToGlobal(self._menu_pos()))
-        if act == act_image:
-            self._open_local_image_detect()
-        elif act == act_model:
+        if act == act_model:
             self._on_model_mgr()
         elif act == act_about:
             QMessageBox.about(self, "关于",
@@ -480,21 +832,59 @@ class MainWindow(QMainWindow):
         return self.title_bar.rect().topRight() - self.title_bar.rect().topLeft() \
             + self.title_bar.pos()
 
-    def _open_local_image_detect(self):
-        from components.local_image_detect import LocalImageDetectDialog
-        dlg = LocalImageDetectDialog(
-            local_model=self._local_model, rois=self._rois, parent=self)
-        dlg.result_committed.connect(self._on_local_image_result)
-        dlg.exec_()
+    def _on_local_image(self):
+        """本地图片：选图后直接显示在实时预览区，不弹窗。
+        点「开始检测」时对这张图做单帧推理。
+        若取消选择且当前处于本地图片模式，则切回实时流模式。"""
+        last_dir = self.cfg.get("state", {}).get("last_image_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择检测图片", last_dir,
+            "图片文件 (*.png *.jpg *.jpeg *.bmp)")
+        if not path:
+            # 取消选择：如果当前是本地图片模式，则清除并切回实时流模式
+            if self._local_image_active:
+                self._local_image = None
+                self._local_image_path = ""
+                self._local_image_active = False
+                self.status_left.setText("就绪　|　检测帧率: -- FPS")
+                self.controller.log_message.emit(
+                    "INFO", "检测", "已清除本地图片，切换为实时流模式")
+            return
+        # 记忆目录
+        self._save_state(last_image_dir=os.path.dirname(path) or "")
+        # cv2.imread 不支持中文路径，用 np.fromfile + imdecode 替代
+        import numpy as np
+        try:
+            _raw = np.fromfile(path, dtype=np.uint8)
+            _img = cv2.imdecode(_raw, cv2.IMREAD_COLOR)
+        except Exception:
+            _img = None
+        if _img is None:
+            self.controller.log_message.emit("ERROR", "检测", f"无法读取图片: {path}")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.warning(self, "本地图片", f"无法读取图片:\n{path}")
+            return
 
-    def _on_local_image_result(self, data: dict):
-        dets = data.get("dets", [])
-        frame = data.get("frame")
-        path = data.get("image_path", "")
-        self.controller.ingest_result(dets, frame, path)
+        # 停止实时流（如果在运行），本地图片只做单帧
+        self._on_stop()
+
+        # 设置本地图片模式
+        self._local_image = _img
+        self._local_image_path = path
+        self._local_image_active = True
+
+        # 直接显示在预览区
+        rgb = cv2.cvtColor(_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        self.page_realtime.update_image(
+            QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+        self.page_realtime.update_detections([])  # 清除之前的检测框
+
+        basename = os.path.basename(path)
         self.controller.log_message.emit(
-            "INFO", "检测", f"本地图片检测完成: {os.path.basename(path)} "
-            f"({'NG 缺陷×' + str(len(dets)) if dets else 'OK'})")
+            "INFO", "检测",
+            f"已加载本地图片: {basename}（点击「开始检测」进行推理）")
+        self.status_left.setText(f"本地图片: {basename}　|　点击开始检测")
 
     def closeEvent(self, event):
         try:
@@ -600,13 +990,40 @@ def main():
         with open(qss, "r", encoding="utf-8") as f:
             app.setStyleSheet(f.read())
     win = MainWindow()
-    win.show()
+    win.showMaximized()
     sys.exit(app.exec_())
 
 
+def _crash_log(tb: str):
+    """把异常写入 data/crash.log（pythonw 启动无控制台，用于排错）"""
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "crash.log"), "a", encoding="utf-8") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {tb}\n")
+    except Exception:
+        pass
+
+
+def _install_excepthook():
+    """全局未捕获异常 → 写 crash.log（Qt 槽内异常默认只打到 stderr，pythonw 下不可见）"""
+    def hook(exc_type, exc_val, exc_tb):
+        import traceback as _tb
+        text = "".join(_tb.format_exception(exc_type, exc_val, exc_tb))
+        try:
+            sys.stderr.write(text)
+        except Exception:
+            pass
+        _crash_log(text)
+    sys.excepthook = hook
+
+
 if __name__ == "__main__":
+    _install_excepthook()
     try:
         main()
     except Exception:
         traceback.print_exc()
-        QMessageBox.critical(None, "启动失败", f"程序启动失败：\n{traceback.format_exc()}")
+        tb = traceback.format_exc()
+        _crash_log(tb)
+        QMessageBox.critical(None, "启动失败", f"程序启动失败：\n{tb}")

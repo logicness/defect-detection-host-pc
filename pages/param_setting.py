@@ -2,22 +2,32 @@
 P2 参数设置页（设计稿图 2）
 左：相机参数；中：检测模型 + 图像预处理；右：ROI设置(表格+预览) + 存储设置
 底部：应用设置 / 保存配置 / 恢复默认
+卡片垂直撑满、字体 18px、输入框加高、间距宽松
 """
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QDoubleSpinBox, QSpinBox, QLineEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QTableWidget, QTableWidgetItem,
+    QHeaderView, QFileDialog, QDialog, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
-from components.common_widgets import Card, Toggle, form_row
+from components.common_widgets import Card, Toggle, form_row, SpinBox, DoubleSpinBox, FocusComboBox
 from components.image_preview import ImagePreview
 from components.roi_editor import RoiEditDialog
+
+_INPUT_H = 36  # 输入框统一高度
+
+
+def _style_input(w):
+    """统一输入框样式：36px 高、16px 字号"""
+    w.setFixedHeight(_INPUT_H)
+    w.setStyleSheet("font-size:16px;")
+    return w
 
 
 def _lbl(text):
     l = QLabel(text)
-    l.setStyleSheet("color:#cbd5e1; font-size:16px; background:transparent;")
+    l.setStyleSheet("color:#cbd5e1; font-size:18px; background:transparent;")
     return l
 
 
@@ -35,14 +45,14 @@ class ParamSettingPage(QWidget):
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(16)
 
         top = QHBoxLayout()
-        top.setSpacing(10)
+        top.setSpacing(16)
         top.addLayout(self._build_camera(), 3)
         top.addLayout(self._build_model(), 4)
-        top.addLayout(self._build_right(), 5)
+        top.addLayout(self._build_right(), 4)
         root.addLayout(top, 1)
 
         # 底部按钮条
@@ -50,18 +60,18 @@ class ParamSettingPage(QWidget):
         bar.addStretch()
         self.btn_apply = QPushButton("✓  应用设置")
         self.btn_apply.setObjectName("btnPrimary")
-        self.btn_apply.setFixedSize(200, 44)
+        self.btn_apply.setFixedSize(220, 48)
         self.btn_apply.clicked.connect(self._on_apply)
         self.btn_save = QPushButton("保存配置")
-        self.btn_save.setFixedSize(200, 44)
+        self.btn_save.setFixedSize(220, 48)
         self.btn_save.clicked.connect(lambda: self.save_config_requested.emit(self.get_config()))
         self.btn_reset = QPushButton("↺  恢复默认")
-        self.btn_reset.setFixedSize(200, 44)
+        self.btn_reset.setFixedSize(220, 48)
         self.btn_reset.clicked.connect(self.reset_requested)
         bar.addWidget(self.btn_apply)
-        bar.addSpacing(24)
+        bar.addSpacing(32)
         bar.addWidget(self.btn_save)
-        bar.addSpacing(24)
+        bar.addSpacing(32)
         bar.addWidget(self.btn_reset)
         bar.addStretch()
         root.addLayout(bar)
@@ -69,62 +79,79 @@ class ParamSettingPage(QWidget):
     # ---------- 左：相机参数 ----------
     def _build_camera(self):
         col = QVBoxLayout()
+        col.setSpacing(16)
         card = Card("相机参数")
-        self.combo_camera = QComboBox()
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.combo_camera = FocusComboBox()
         self.combo_camera.addItems(["相机 01", "相机 02"])
-        self.spin_exposure = QDoubleSpinBox()
+        self.spin_exposure = DoubleSpinBox()
         self.spin_exposure.setRange(0.1, 1000)
         self.spin_exposure.setValue(10.0)
-        self.spin_gain = QDoubleSpinBox()
+        self.spin_gain = DoubleSpinBox()
         self.spin_gain.setRange(0, 48)
         self.spin_gain.setValue(2.0)
-        self.spin_bright = QSpinBox()
+        self.spin_bright = SpinBox()
         self.spin_bright.setRange(0, 255)
         self.spin_bright.setValue(128)
-        self.combo_trigger = QComboBox()
+        self.combo_trigger = FocusComboBox()
         self.combo_trigger.addItems(["连续触发", "硬件触发", "软件触发"])
-        self.combo_fps = QComboBox()
+        self.combo_fps = FocusComboBox()
         self.combo_fps.addItems(["30 FPS", "15 FPS", "60 FPS"])
+
         for lbl, w in (("相机选择", self.combo_camera), ("曝光时间 (ms)", self.spin_exposure),
                        ("增益 (dB)", self.spin_gain), ("光源亮度", self.spin_bright),
                        ("触发模式", self.combo_trigger), ("采集帧率", self.combo_fps)):
-            card.body.addLayout(form_row(lbl, w, 110))
-        col.addWidget(card)
-        col.addStretch()
+            _style_input(w)
+            card.body.addLayout(form_row(lbl, w, 160))
+
+        # 让内容均匀撑满卡片
+        card.body.addStretch()
+        col.addWidget(card, 1)  # stretch=1 让卡片撑满垂直空间
         return col
 
     # ---------- 中：检测模型 + 预处理 ----------
     def _build_model(self):
         col = QVBoxLayout()
+        col.setSpacing(16)
+
         m = Card("检测模型")
+        m.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.edit_cur_model = QLineEdit("Product_A_v1")
         self.edit_cur_model.setReadOnly(True)
         self.edit_model_file = QLineEdit()
         self.edit_model_file.setPlaceholderText("C:/models/Product_A_v1.onnx")
+        _style_input(self.edit_cur_model)
+        _style_input(self.edit_model_file)
         btn_browse = QPushButton("…")
         btn_browse.setObjectName("iconBtn")
-        btn_browse.setFixedWidth(32)
+        btn_browse.setFixedHeight(_INPUT_H)
+        btn_browse.setFixedWidth(36)
         btn_browse.clicked.connect(self._browse_model)
         frow = QHBoxLayout()
+        frow.setSpacing(4)
         frow.addWidget(self.edit_model_file, 1)
         frow.addWidget(btn_browse)
-        self.combo_input = QComboBox()
+        self.combo_input = FocusComboBox()
         self.combo_input.addItems(["640×640", "320×320", "1280×1280"])
-        self.spin_conf = QDoubleSpinBox()
+        self.spin_conf = DoubleSpinBox()
         self.spin_conf.setRange(0.05, 1.0)
         self.spin_conf.setSingleStep(0.05)
         self.spin_conf.setValue(0.85)
-        self.spin_area = QSpinBox()
+        self.spin_area = SpinBox()
         self.spin_area.setRange(0, 100000)
         self.spin_area.setValue(50)
-        m.body.addLayout(form_row("当前模型", self.edit_cur_model, 110))
-        m.body.addLayout(form_row("模型文件", frow, 110))
-        m.body.addLayout(form_row("输入尺寸", self.combo_input, 110))
-        m.body.addLayout(form_row("置信度阈值", self.spin_conf, 110))
-        m.body.addLayout(form_row("最小缺陷面积 (px)", self.spin_area, 110))
+        for w in (self.combo_input, self.spin_conf, self.spin_area):
+            _style_input(w)
+        m.body.addLayout(form_row("当前模型", self.edit_cur_model, 160))
+        m.body.addLayout(form_row("模型文件", frow, 160))
+        m.body.addLayout(form_row("输入尺寸", self.combo_input, 160))
+        m.body.addLayout(form_row("置信度阈值", self.spin_conf, 160))
+        m.body.addLayout(form_row("最小缺陷面积 (px)", self.spin_area, 160))
         btn_load = QPushButton("加载模型")
         btn_load.setObjectName("btnPrimary")
-        btn_load.setFixedHeight(36)
+        btn_load.setFixedHeight(40)
+        btn_load.setStyleSheet("font-size:16px;")
         btn_load.clicked.connect(
             lambda: self.load_model_requested.emit(self.edit_cur_model.text()))
         mrow = QHBoxLayout()
@@ -132,61 +159,77 @@ class ParamSettingPage(QWidget):
         mrow.addWidget(btn_load)
         mrow.addStretch()
         m.body.addLayout(mrow)
-        col.addWidget(m)
+        m.body.addStretch()
+        col.addWidget(m, 3)  # 模型卡占 3 份
 
         p = Card("图像预处理")
-        self.combo_resize = QComboBox()
+        p.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.combo_resize = FocusComboBox()
         self.combo_resize.addItems(["不缩放（保持原始）", "缩放至 640×640", "缩放至 1280×1280"])
         self.tg_gray = Toggle(True)
-        self.combo_denoise = QComboBox()
+        self.combo_denoise = FocusComboBox()
         self.combo_denoise.addItems(["中值滤波（3×3）", "高斯滤波（3×3）", "不去噪"])
         self.tg_contrast = Toggle(True)
+        for w in (self.combo_resize, self.combo_denoise):
+            _style_input(w)
         for lbl, w in (("尺寸调整", self.combo_resize), ("灰度归一化", self.tg_gray),
                        ("去噪", self.combo_denoise), ("对比度增强", self.tg_contrast)):
-            p.body.addLayout(form_row(lbl, w, 110))
-        col.addWidget(p)
-        col.addStretch()
+            p.body.addLayout(form_row(lbl, w, 160))
+        p.body.addStretch()
+        col.addWidget(p, 2)  # 预处理卡占 2 份
         return col
 
     # ---------- 右：ROI + 存储 ----------
     def _build_right(self):
         col = QVBoxLayout()
+        col.setSpacing(16)
+
         roi = Card("ROI设置")
+        roi.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.roi_table = QTableWidget()
         self.roi_table.setColumnCount(4)
         self.roi_table.setHorizontalHeaderLabels(["ROI", "启用", "坐标 (x, y, w, h)", "操作"])
         self.roi_table.verticalHeader().setVisible(False)
         self.roi_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.roi_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.roi_table.setMaximumHeight(140)
         roi.body.addWidget(self.roi_table)
+        # 添加 ROI 按钮：全宽、加高、往下留间距
         btn_add = QPushButton("添加ROI")
-        btn_add.setFixedWidth(110)
+        btn_add.setFixedHeight(38)
+        btn_add.setStyleSheet("font-size:16px;")
         btn_add.clicked.connect(self._add_roi)
-        roi.body.addWidget(btn_add, 0, Qt.AlignLeft)
+        roi.body.addSpacing(8)
+        roi.body.addWidget(btn_add)
+        roi.body.addSpacing(8)
         self.preview = ImagePreview()
-        self.preview.setMinimumHeight(200)
+        self.preview.setMinimumHeight(220)
         roi.body.addWidget(self.preview, 1)
-        col.addWidget(roi)
+        col.addWidget(roi, 5)  # ROI 卡占 5 份（更大，看清全部）
 
         st = Card("存储设置")
+        st.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.edit_save_path = QLineEdit("D:/Inspect/Images")
+        _style_input(self.edit_save_path)
         brow = QHBoxLayout()
+        brow.setSpacing(4)
         brow.addWidget(self.edit_save_path, 1)
         bb = QPushButton("…")
         bb.setObjectName("iconBtn")
-        bb.setFixedWidth(32)
+        bb.setFixedHeight(_INPUT_H)
+        bb.setFixedWidth(36)
         bb.clicked.connect(self._browse_save)
         brow.addWidget(bb)
         self.tg_save_ng = Toggle(True)
         self.tg_save_orig = Toggle(True)
-        self.combo_clean = QComboBox()
+        self.combo_clean = FocusComboBox()
         self.combo_clean.addItems(["磁盘空间 < 10% 时删除", "保留最近 30 天", "不清理"])
-        st.body.addLayout(form_row("保存路径", brow, 110))
-        st.body.addLayout(form_row("保存NG图像", self.tg_save_ng, 110))
-        st.body.addLayout(form_row("保存原图", self.tg_save_orig, 110))
-        st.body.addLayout(form_row("自动清理", self.combo_clean, 110))
-        col.addWidget(st)
+        _style_input(self.combo_clean)
+        st.body.addLayout(form_row("保存路径", brow, 160))
+        st.body.addLayout(form_row("保存NG图像", self.tg_save_ng, 160))
+        st.body.addLayout(form_row("保存原图", self.tg_save_orig, 160))
+        st.body.addLayout(form_row("自动清理", self.combo_clean, 160))
+        st.body.addStretch()
+        col.addWidget(st, 1)  # 存储卡占 1 份（紧凑）
         return col
 
     # ================= ROI =================
@@ -211,7 +254,7 @@ class ParamSettingPage(QWidget):
                 row, 2, QTableWidgetItem(f"{r['x']}, {r['y']}, {r['w']}, {r['h']}"))
             be = QPushButton("编辑")
             be.setObjectName("iconBtn")
-            be.setFixedSize(44, 24)
+            be.setFixedSize(50, 28)
             be.clicked.connect(lambda _=False, rr=r: self._edit_roi(rr))
             self.roi_table.setCellWidget(row, 3, be)
         self._render_preview()
@@ -244,8 +287,10 @@ class ParamSettingPage(QWidget):
             self.roi_changed.emit(self._rois)
 
     def _add_roi(self):
-        self._rois.append({"name": f"ROI {len(self._rois) + 1}", "enabled": True,
-                           "x": 100, "y": 100, "w": 200, "h": 200})
+        n = len(self._rois)
+        offset = n * 60
+        self._rois.append({"name": f"ROI {n + 1}", "enabled": True,
+                           "x": 80 + offset, "y": 80 + offset, "w": 200, "h": 200})
         self._rebuild_table()
         self.roi_changed.emit(self._rois)
 

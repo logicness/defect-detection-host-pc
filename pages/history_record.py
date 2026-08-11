@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt5.QtGui import QImage
 
-from components.common_widgets import Card, KPICard, SegGroup, StyledTable, form_row
+from components.common_widgets import Card, KPICard, SegGroup, StyledTable, form_row, FocusComboBox
 from components.image_preview import ImagePreview
 from components.stats_charts import TrendChart, DefectPieChart
 
@@ -86,10 +86,10 @@ class HistoryRecordPage(QWidget):
         self.dt_to.setCalendarPopup(True)
         self.dt_to.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.dt_to.setDateTime(QDateTime.currentDateTime())
-        self.combo_product = QComboBox()
+        self.combo_product = FocusComboBox()
         self.combo_product.addItems(["全部", "Product_A_v1"])
         self.seg_result = SegGroup(["全部", "OK", "NG"])
-        self.combo_defect = QComboBox()
+        self.combo_defect = FocusComboBox()
         self.combo_defect.addItems(["全部"])
         self.edit_keyword = QLineEdit()
         self.edit_keyword.setPlaceholderText("请输入关键词")
@@ -167,7 +167,7 @@ class HistoryRecordPage(QWidget):
         pag.addWidget(self.btn_next)
         pag.addWidget(self.btn_last)
         pag.addSpacing(12)
-        self.combo_size = QComboBox()
+        self.combo_size = FocusComboBox()
         self.combo_size.addItems(["15 条/页", "30 条/页", "50 条/页"])
         self.combo_size.currentIndexChanged.connect(self._on_size)
         pag.addWidget(self.combo_size)

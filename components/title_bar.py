@@ -32,9 +32,9 @@ class TitleBar(QWidget):
         lay.addStretch()
 
         # 三状态灯（图 1 顶部：相机已连接 / PLC已连接 / 模型已加载）
-        self.light_camera = StatusLight("相机已连接")
-        self.light_plc = StatusLight("PLC已连接")
-        self.light_model = StatusLight("模型已加载")
+        self.light_camera = StatusLight("相机未连接")
+        self.light_plc = StatusLight("PLC未连接")
+        self.light_model = StatusLight("模型未加载")
         for w in (self.light_camera, self.light_plc, self.light_model):
             w.setFixedWidth(130)
             lay.addWidget(w)
@@ -84,6 +84,11 @@ class TitleBar(QWidget):
             plc, "PLC已连接" if plc == 1 else ("PLC故障" if plc == 2 else "PLC未连接"))
         self.light_model.set_status(
             model, "模型已加载" if model == 1 else "模型未加载")
+        # 更新 tag 标签
+        if model == 1:
+            self.tag_model.setText(f"当前模型: {self.tag_model.text().split(': ', 1)[-1] if ': ' in self.tag_model.text() and self.tag_model.text().split(': ', 1)[-1] != '--' else '--'}")
+        if camera == 0:
+            self.tag_camera.setText("相机: --")
 
     # ---------- 拖动移动 ----------
     def mousePressEvent(self, event):

@@ -9,7 +9,7 @@ ROI 可视化编辑对话框
 """
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QSpinBox, QPushButton, QCheckBox, QFrame
+    QPushButton, QCheckBox, QFrame
 )
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
@@ -19,7 +19,7 @@ _MARGIN = 14
 
 
 def _spin(min_v, max_v, val):
-    s = QSpinBox()
+    s = SpinBox()
     s.setRange(min_v, max_v)
     s.setValue(val)
     s.setFixedHeight(34)
@@ -226,6 +226,7 @@ class RoiEditDialog(QDialog):
 
     def __init__(self, roi: dict, parent=None, image: QImage = None):
         super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setWindowTitle(f"编辑 {roi.get('name', 'ROI')}")
         self.setModal(True)
         self.setMinimumWidth(600)

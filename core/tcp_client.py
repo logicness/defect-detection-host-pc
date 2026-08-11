@@ -1,10 +1,12 @@
 """
 TCP 通信客户端（与下位机 RK3568/Orin 推理服务通信）
 协议：4 字节大端长度包头 + UTF-8 JSON 载荷
-功能：心跳保活 + 看门狗（半开连接主动重连）+ 指数退避重连 + 发送图片/接收结果 + 参数下发
+功能：心跳保活 + 看门狗（半开连接主动重连）+ 指数退避重连 + 发送图片/接收结果 + 参数下发 + 模型管理
 """
 import base64
+import hashlib
 import json
+import os
 import socket
 import struct
 import threading
@@ -15,6 +17,8 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
+CHUNK_SIZE = 1 * 1024 * 1024  # 模型分片上传：1MB/片
+
 
 class TCPClient(QObject):
     connected = pyqtSignal()
@@ -24,6 +28,9 @@ class TCPClient(QObject):
     log_message = pyqtSignal(str, str)     # (level, msg)
     model_list_received = pyqtSignal(dict)
     model_load_received = pyqtSignal(dict)
+    model_upload_received = pyqtSignal(dict)  # model_upload_response
+    model_status_received = pyqtSignal(dict)  # model_status（编译进度推送）
+    model_delete_received = pyqtSignal(dict)  # model_delete_response
 
     def __init__(self):
         super().__init__()
@@ -106,12 +113,61 @@ class TCPClient(QObject):
     def load_model(self, name: str):
         self._enqueue({"type": "model_load_request", "model": name})
 
+    def delete_model(self, name: str):
+        """删除下位机端模型（激活模型会被拒绝）"""
+        self._enqueue({"type": "model_delete_request", "model": name})
+
+    def upload_model(self, path: str, progress_cb=None):
+        """分片上传本地模型到下位机（后台线程执行）。
+        progress_cb(received_bytes, total_bytes) 在子线程回调。
+        .onnx/.pt 上传后下位机自动编译，编译进度经 model_status_received 推送。"""
+        threading.Thread(
+            target=self._upload_worker, args=(path, progress_cb), daemon=True).start()
+
+    def _upload_worker(self, path: str, progress_cb=None):
+        try:
+            filename = os.path.basename(path)
+            size = os.path.getsize(path)
+            if size <= 0:
+                self.log_message.emit("ERROR", f"上传失败: 文件为空 {path}")
+                return
+            self._enqueue({"type": "model_upload_start",
+                           "filename": filename, "size": size,
+                           "chunk_size": CHUNK_SIZE})
+            sha = hashlib.sha256()
+            seq = 0
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+                    self._enqueue({
+                        "type": "model_upload_chunk",
+                        "filename": filename,
+                        "seq": seq,
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    })
+                    seq += 1
+                    if progress_cb:
+                        progress_cb(min(seq * CHUNK_SIZE, size), size)
+                    time.sleep(0.01)  # 让出发送线程
+            self._enqueue({"type": "model_upload_end",
+                           "filename": filename, "checksum": sha.hexdigest()})
+            if progress_cb:
+                progress_cb(size, size)
+            self.log_message.emit(
+                "INFO", f"模型上传完成: {filename} ({size/1e6:.1f}MB, {seq} 片)")
+        except Exception as e:
+            self.log_message.emit("ERROR", f"模型上传失败: {e}")
+
     def _enqueue(self, payload: dict):
         self._send_queue.put(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     # ---------------- 内部线程 ----------------
     def _connect_loop(self):
         retry = 0
+        last_ok_ts = 0.0  # 上次连接成功时间（用于检测「秒断」风暴）
         while self._running:
             try:
                 self.log_message.emit("INFO", f"正在连接 {self.host}:{self.port}...")
@@ -123,6 +179,7 @@ class TCPClient(QObject):
                     self._sock = sock
                     self._connected = True
                 retry = 0
+                last_ok_ts = time.time()
                 self._last_recv = time.time()
                 self.connected.emit()
                 self.log_message.emit("INFO", f"已连接 {self.host}:{self.port}")
@@ -137,11 +194,11 @@ class TCPClient(QObject):
                         "WARN", f"连接失败({e})，{delay}s 后重试 ({retry}/{self.max_retries})")
                     time.sleep(delay)
                 else:
-                    self.log_message.emit("ERROR", f"连接失败，已达最大重试次数 {self.max_retries}")
-                    self._connected = False
-                    self.disconnected.emit()
-                    self._running = False
-                    return
+                    # 重试耗尽不退出：开发板可能后开机/重启，持续后台自动重连
+                    self.log_message.emit(
+                        "WARN", f"连接失败({e})，持续自动重连中...")
+                    retry = 0
+                    time.sleep(5)
             finally:
                 with self._lock:
                     self._connected = False
@@ -153,6 +210,11 @@ class TCPClient(QObject):
                         self._sock = None
                 if self._running:
                     self.disconnected.emit()
+                # 「秒断」防护：连接成功但存活不足 2 秒（对端立即断开），退避 1s，
+                # 避免 connect→recv EOF→reconnect 快速风暴刷日志/打满 CPU
+                if last_ok_ts and time.time() - last_ok_ts < 2.0 and self._running:
+                    self.log_message.emit("WARN", "连接存活过短，退避 1s 后重连")
+                    time.sleep(1.0)
 
     def _heartbeat_loop(self):
         """心跳 + 看门狗：3 个周期无任何接收 → 判定对端失联，主动重连"""
@@ -226,6 +288,12 @@ class TCPClient(QObject):
                     self.model_list_received.emit(payload)
                 elif t == "model_load_response":
                     self.model_load_received.emit(payload)
+                elif t == "model_upload_response":
+                    self.model_upload_received.emit(payload)
+                elif t == "model_status":
+                    self.model_status_received.emit(payload)
+                elif t == "model_delete_response":
+                    self.model_delete_received.emit(payload)
                 elif t == "error":
                     self.error_occurred.emit(payload.get("message", "未知错误"))
                 else:

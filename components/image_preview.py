@@ -1,26 +1,38 @@
 """
 图像预览组件：缩放/平移/ROI 绿框/缺陷红框/NG 浮窗
 滚轮缩放(30%~500%)、中键拖动平移、双击还原
+新增：左键可直接在画面上拖动 ROI 或拖右下角手柄缩放
 """
 from PyQt5.QtWidgets import QWidget
-from PyQt5.QtCore import Qt, QPointF, QRectF
+from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QImage
 
 
 class ImagePreview(QWidget):
+    roi_edited = pyqtSignal(int, dict)  # (roi_index_in_full_list, roi_dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(320, 240)
         self.setStyleSheet("background-color:#0f172a; border:1px solid #2a3441;")
         self.setMouseTracking(True)
         self._img = None            # QImage
-        self._rois = []             # [{x,y,w,h,enabled}]
+        self._rois = []             # 完整 ROI 列表 [{x,y,w,h,enabled}, ...]
         self._dets = []             # [(cls, conf, x1,y1,x2,y2)]
         self._ng_conf = None        # NG 浮窗置信度
         self._zoom = 1.0
         self._pan = QPointF(0, 0)
-        self._dragging = False
-        self._drag_last = QPointF()
+        self._pan_dragging = False  # 中键平移状态
+        self._pan_last = QPointF()
+
+        # ROI 鼠标编辑状态
+        self._roi_drag_idx = -1     # 正在拖拽的 ROI 在 _rois 中的索引
+        self._roi_drag_mode = None  # "move" / "resize"
+        self._roi_drag_start = None  # 控件坐标 QPointF
+        self._roi_drag_orig = None   # 拖拽开始时的 ROI 副本
+        self._roi_hover_idx = -1     # 当前悬停的 ROI 索引
+        self._roi_hover_mode = None
+        self._handle_size = 12       # 右下角手柄尺寸（控件像素）
 
     # ---------------- 数据接口 ----------------
     def set_image(self, img: QImage):
@@ -32,7 +44,7 @@ class ImagePreview(QWidget):
         return self._img
 
     def set_rois(self, rois: list):
-        self._rois = [r for r in rois if r.get("enabled", True)]
+        self._rois = list(rois)
         self.update()
 
     def set_detections(self, dets: list):
@@ -56,6 +68,55 @@ class ImagePreview(QWidget):
         oy = (self.height() - ih * s) / 2 + self._pan.y()
         return s, ox, oy
 
+    def _pos_to_img(self, pos):
+        """控件坐标 → 图像坐标"""
+        s, ox, oy = self._view()
+        if s <= 0:
+            return 0, 0
+        return (pos.x() - ox) / s, (pos.y() - oy) / s
+
+    def _roi_rect(self, roi):
+        """返回 ROI 在控件上的 QRectF"""
+        s, ox, oy = self._view()
+        return QRectF(ox + roi["x"] * s, oy + roi["y"] * s,
+                      roi["w"] * s, roi["h"] * s)
+
+    # ---------------- ROI 命中检测 ----------------
+    def _enabled_rois(self):
+        for i, r in enumerate(self._rois):
+            if r.get("enabled", True):
+                yield i, r
+
+    def _hit_test(self, pos):
+        """返回 (roi_index, mode) 或 None；优先 resize 手柄，再 move 框体"""
+        # 逆序遍历，让上层（后绘制）ROI 优先响应
+        for idx, roi in reversed(list(self._enabled_rois())):
+            r = self._roi_rect(roi)
+            if not r.isValid():
+                continue
+            # resize 手柄区域
+            handle = QRectF(r.right() - self._handle_size,
+                            r.bottom() - self._handle_size,
+                            self._handle_size, self._handle_size)
+            if handle.contains(pos):
+                return idx, "resize"
+            # move 框体区域（含轻微扩展便于命中）
+            if r.adjusted(-3, -3, 3, 3).contains(pos):
+                return idx, "move"
+        return None
+
+    def _clamp_roi(self, roi: dict):
+        """限制 ROI 在图像范围内"""
+        if self._img is None or self._img.isNull():
+            iw, ih = 640, 480
+        else:
+            iw, ih = self._img.width(), self._img.height()
+        roi["x"] = int(max(0, min(iw - 1, roi["x"])))
+        roi["y"] = int(max(0, min(ih - 1, roi["y"])))
+        roi["w"] = int(max(10, min(iw - roi["x"], roi["w"])))
+        roi["h"] = int(max(10, min(ih - roi["y"], roi["h"])))
+        return roi
+
     # ---------------- 绘制 ----------------
     def paintEvent(self, event):
         p = QPainter(self)
@@ -76,10 +137,19 @@ class ImagePreview(QWidget):
         p.setClipRect(target)
 
         # ROI 绿框
-        pen = QPen(QColor("#22c55e"), 2)
-        p.setPen(pen)
-        for r in self._rois:
-            p.drawRect(QRectF(ox + r["x"] * s, oy + r["y"] * s, r["w"] * s, r["h"] * s))
+        for idx, r in self._enabled_rois():
+            rr = self._roi_rect(r)
+            active = (idx == self._roi_drag_idx or idx == self._roi_hover_idx)
+            pen = QPen(QColor("#4ade80" if active else "#22c55e"),
+                       3 if active else 2)
+            p.setPen(pen)
+            p.drawRect(rr)
+            # 右下角手柄
+            if active:
+                p.fillRect(rr.right() - self._handle_size,
+                           rr.bottom() - self._handle_size,
+                           self._handle_size, self._handle_size,
+                           QColor("#4ade80"))
 
         # 缺陷红框
         p.setPen(QPen(QColor("#ef4444"), 2))
@@ -114,20 +184,76 @@ class ImagePreview(QWidget):
         self.zoom_by(0.1 if event.angleDelta().y() > 0 else -0.1)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
-            self._dragging = True
-            self._drag_last = QPointF(event.localPos())
+        pos = event.localPos()
+        if event.button() == Qt.LeftButton:
+            hit = self._hit_test(pos)
+            if hit is not None:
+                self._roi_drag_idx, self._roi_drag_mode = hit
+                self._roi_drag_start = QPointF(pos)
+                self._roi_drag_orig = dict(self._rois[self._roi_drag_idx])
+                self._roi_hover_idx = self._roi_drag_idx
+                self._roi_hover_mode = self._roi_drag_mode
+                cursor = (Qt.SizeFDiagCursor if self._roi_drag_mode == "resize"
+                          else Qt.ClosedHandCursor)
+                self.setCursor(cursor)
+                event.accept()
+                return
+        elif event.button() == Qt.MiddleButton:
+            self._pan_dragging = True
+            self._pan_last = QPointF(pos)
 
     def mouseMoveEvent(self, event):
-        if self._dragging:
-            pos = QPointF(event.localPos())
-            self._pan += pos - self._drag_last
-            self._drag_last = pos
+        pos = event.localPos()
+        # ROI 拖拽中
+        if self._roi_drag_idx >= 0 and self._roi_drag_mode and self._roi_drag_start is not None:
+            x0, y0 = self._pos_to_img(self._roi_drag_start)
+            x1, y1 = self._pos_to_img(pos)
+            dx = x1 - x0
+            dy = y1 - y0
+            roi = dict(self._roi_drag_orig)
+            if self._roi_drag_mode == "move":
+                roi["x"] = int(self._roi_drag_orig["x"] + dx)
+                roi["y"] = int(self._roi_drag_orig["y"] + dy)
+            else:  # resize
+                roi["w"] = int(self._roi_drag_orig["w"] + dx)
+                roi["h"] = int(self._roi_drag_orig["h"] + dy)
+            self._clamp_roi(roi)
+            self._rois[self._roi_drag_idx] = roi
             self.update()
+            event.accept()
+            return
+        # 中键平移
+        if self._pan_dragging:
+            self._pan += QPointF(pos) - self._pan_last
+            self._pan_last = QPointF(pos)
+            self.update()
+            return
+        # 悬停光标提示
+        hit = self._hit_test(pos)
+        if hit is not None:
+            self._roi_hover_idx, self._roi_hover_mode = hit
+            cursor = (Qt.SizeFDiagCursor if hit[1] == "resize"
+                      else Qt.OpenHandCursor)
+            self.setCursor(cursor)
+        else:
+            self._roi_hover_idx = -1
+            self._roi_hover_mode = None
+            self.unsetCursor()
+        self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._roi_drag_idx >= 0:
+            roi = self._rois[self._roi_drag_idx]
+            self.roi_edited.emit(self._roi_drag_idx, dict(roi))
+            self._roi_drag_idx = -1
+            self._roi_drag_mode = None
+            self._roi_drag_start = None
+            self._roi_drag_orig = None
+            self.unsetCursor()
+            event.accept()
+            return
         if event.button() == Qt.MiddleButton:
-            self._dragging = False
+            self._pan_dragging = False
 
     def mouseDoubleClickEvent(self, event):
         self._zoom, self._pan = 1.0, QPointF(0, 0)

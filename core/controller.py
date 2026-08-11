@@ -84,7 +84,7 @@ class AppController(QObject):
 
         self.plc_auto_reject = True
         self.plc_reject_enabled = True
-        self.ng_alarm_threshold = 5
+        self.ng_alarm_threshold = 50
         self._consecutive_ng = 0
 
         self._total = self._defect = 0

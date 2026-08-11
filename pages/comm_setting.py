@@ -6,11 +6,11 @@ PLC通信(Modbus TCP) | I/O信号映射表
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QSpinBox, QCheckBox, QTextEdit
+    QLineEdit, QCheckBox, QTextEdit, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
-from components.common_widgets import Card, KPICard, StatusLight, StyledTable, form_row
+from components.common_widgets import Card, KPICard, StatusLight, StyledTable, form_row, SpinBox, DoubleSpinBox, FocusComboBox
 from core.serial_client import SerialClient
 
 
@@ -18,6 +18,13 @@ def _lbl(text):
     l = QLabel(text)
     l.setStyleSheet("color:#cbd5e1; font-size:16px; background:transparent;")
     return l
+
+
+def _style_input(w):
+    """统一输入控件样式：36px 高、16px 字体"""
+    w.setFixedHeight(36)
+    w.setStyleSheet("font-size:16px;")
+    return w
 
 
 class CommSettingPage(QWidget):
@@ -55,40 +62,48 @@ class CommSettingPage(QWidget):
     # ---------- PLC 通信 ----------
     def _build_plc(self):
         col = QVBoxLayout()
+        col.setSpacing(8)
         card = Card("PLC通信")
-        self.combo_proto = QComboBox()
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.combo_proto = FocusComboBox()
         self.combo_proto.addItems(["Modbus TCP"])
         self.edit_ip = QLineEdit("192.168.1.200")
-        self.spin_port = QSpinBox()
+        self.spin_port = SpinBox()
         self.spin_port.setRange(1, 65535)
         self.spin_port.setValue(2000)
-        self.spin_unit = QSpinBox()
+        self.spin_unit = SpinBox()
         self.spin_unit.setRange(0, 255)
         self.spin_unit.setValue(1)
-        self.spin_timeout = QSpinBox()
+        self.spin_timeout = SpinBox()
         self.spin_timeout.setRange(100, 60000)
         self.spin_timeout.setValue(3000)
-        self.spin_poll = QSpinBox()
+        self.spin_poll = SpinBox()
         self.spin_poll.setRange(50, 10000)
         self.spin_poll.setValue(500)
         for lbl, w in (("通信协议", self.combo_proto), ("服务器IP", self.edit_ip),
                        ("端口号", self.spin_port), ("单元ID", self.spin_unit),
                        ("连接超时 (ms)", self.spin_timeout), ("心跳周期 (ms)", self.spin_poll)):
-            card.body.addLayout(form_row(lbl, w, 110))
+            _style_input(w)
+            card.body.addLayout(form_row(lbl, w, 160))
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.light_plc = StatusLight("未连接")
         row.addWidget(self.light_plc)
         row.addStretch()
         self.btn_disc = QPushButton("断开连接")
+        self.btn_disc.setFixedHeight(36)
+        self.btn_disc.setStyleSheet("font-size:16px;")
         self.btn_disc.clicked.connect(self.plc_disconnect_requested)
         self.btn_test = QPushButton("测试通信")
+        self.btn_test.setFixedHeight(36)
+        self.btn_test.setStyleSheet("font-size:16px;")
         self.btn_test.setObjectName("btnPrimary")
         self.btn_test.clicked.connect(self.test_comm_requested)
         row.addWidget(self.btn_disc)
         row.addWidget(self.btn_test)
         card.body.addLayout(row)
-        col.addWidget(card)
-        col.addStretch()
+        card.body.addStretch()
+        col.addWidget(card, 1)
         return col
 
     # ---------- I/O 映射 ----------
@@ -122,35 +137,43 @@ class CommSettingPage(QWidget):
     # ---------- 串口 ----------
     def _build_serial(self):
         col = QVBoxLayout()
+        col.setSpacing(8)
         card = Card("串口通信")
-        self.combo_port = QComboBox()
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.combo_port = FocusComboBox()
         self.combo_port.addItems(SerialClient.list_ports() or ["COM1"])
-        self.combo_baud = QComboBox()
+        self.combo_baud = FocusComboBox()
         self.combo_baud.addItems(["115200", "9600", "19200", "38400", "57600"])
-        self.combo_bits = QComboBox()
+        self.combo_bits = FocusComboBox()
         self.combo_bits.addItems(["8", "7", "6"])
-        self.combo_stop = QComboBox()
+        self.combo_stop = FocusComboBox()
         self.combo_stop.addItems(["1", "1.5", "2"])
-        self.combo_parity = QComboBox()
+        self.combo_parity = FocusComboBox()
         self.combo_parity.addItems(["None", "Even", "Odd"])
         for lbl, w in (("串口", self.combo_port), ("波特率", self.combo_baud),
                        ("数据位", self.combo_bits), ("停止位", self.combo_stop),
                        ("校验位", self.combo_parity)):
-            card.body.addLayout(form_row(lbl, w, 110))
+            _style_input(w)
+            card.body.addLayout(form_row(lbl, w, 160))
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.light_ser = StatusLight("未连接")
         row.addWidget(self.light_ser)
         row.addStretch()
         self.btn_ser_open = QPushButton("打开串口")
+        self.btn_ser_open.setFixedHeight(36)
+        self.btn_ser_open.setStyleSheet("font-size:16px;")
         self.btn_ser_open.setObjectName("btnPrimary")
         self.btn_ser_open.clicked.connect(self._toggle_serial)
         self.btn_ser_refresh = QPushButton("刷新串口")
+        self.btn_ser_refresh.setFixedHeight(36)
+        self.btn_ser_refresh.setStyleSheet("font-size:16px;")
         self.btn_ser_refresh.clicked.connect(self._refresh_ports)
         row.addWidget(self.btn_ser_open)
         row.addWidget(self.btn_ser_refresh)
         card.body.addLayout(row)
-        col.addWidget(card)
-        col.addStretch()
+        card.body.addStretch()
+        col.addWidget(card, 1)
         return col
 
     # ---------- 通信测试 ----------
@@ -165,11 +188,18 @@ class CommSettingPage(QWidget):
         row.addWidget(self.chk_hex)
         card.body.addLayout(row)
         srow = QHBoxLayout()
+        srow.setSpacing(8)
         self.edit_tx = QLineEdit("01 03 00 00 00 01")
+        self.edit_tx.setFixedHeight(36)
+        self.edit_tx.setStyleSheet("font-size:16px;")
         btn_send = QPushButton("发送")
+        btn_send.setFixedHeight(36)
+        btn_send.setStyleSheet("font-size:16px;")
         btn_send.setObjectName("btnPrimary")
         btn_send.clicked.connect(self._send_test)
         btn_clear = QPushButton("清空")
+        btn_clear.setFixedHeight(36)
+        btn_clear.setStyleSheet("font-size:16px;")
         btn_clear.clicked.connect(lambda: (self.edit_tx.clear(), self.txt_rx.clear()))
         srow.addWidget(self.edit_tx, 1)
         srow.addWidget(btn_send)

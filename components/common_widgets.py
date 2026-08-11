@@ -5,7 +5,8 @@ Card / KPICard / StatusLight / Toggle / StyledTable / SegGroup / form 行助手
 """
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QPushButton, QAbstractButton, QHeaderView, QWidget, QSizePolicy
+    QPushButton, QAbstractButton, QHeaderView, QWidget, QSizePolicy,
+    QSpinBox, QDoubleSpinBox, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QSize
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont
@@ -29,7 +30,7 @@ class Card(QFrame):
         self.body = QVBoxLayout()
         self.body.setContentsMargins(0, 0, 0, 0)
         self.body.setSpacing(8)
-        outer.addLayout(self.body)
+        outer.addLayout(self.body, 1)  # stretch=1 让 body 填满卡片剩余空间
 
 
 # ---------- KPI 数字卡 ----------
@@ -107,12 +108,55 @@ class Toggle(QAbstractButton):
         track = QColor("#2563eb") if on else QColor("#334155")
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(track))
-        p.drawRoundedRect(0, 2, self.width(), self.height() - 4, 9, 9)
+        p.drawRoundedRect(0, 3, self.width(), self.height() - 6, 11, 11)
         # 滑钮
-        r = self.height() - 8
-        x = self.width() - r - 4 if on else 4
+        r = self.height() - 10
+        x = self.width() - r - 5 if on else 5
         p.setBrush(QBrush(QColor("#ffffff")))
-        p.drawEllipse(x, 4, r, r)
+        p.drawEllipse(x, 5, r, r)
+
+
+# ---------- 数值/下拉输入（滚轮需聚焦才生效） ----------
+class SpinBox(QSpinBox):
+    """整数输入框：鼠标滚轮仅在点击聚焦后生效，避免悬停误改"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()  # 未聚焦时把滚轮事件交给父控件/滚动区域
+
+
+class DoubleSpinBox(QDoubleSpinBox):
+    """浮点输入框：鼠标滚轮仅在点击聚焦后生效，避免悬停误改"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class FocusComboBox(QComboBox):
+    """下拉框：滚轮仅在聚焦时切换选项，避免悬停误改"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
 
 
 # ---------- 暗色表格 ----------

@@ -93,10 +93,10 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QDateTimeEdit, QTextEdit, QPlain
     color: #e2e8f0;
     border: 1px solid #334155;
     border-radius: 4px;
-    padding: 7px 12px;
-    min-height: 36px;
+    padding: 8px 12px;
+    min-height: 38px;
     selection-background-color: #2563eb;
-    font-size: 16px;
+    font-size: 18px;
 }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QDateTimeEdit:focus {
     border-color: #2563eb;
