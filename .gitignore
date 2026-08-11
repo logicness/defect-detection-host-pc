@@ -1,0 +1,11 @@
+# 运行时产物
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行数据（DB/配置，由 tools/seed_demo.py 重新生成）
+data/
+
+# 系统
+.DS_Store
+Thumbs.db

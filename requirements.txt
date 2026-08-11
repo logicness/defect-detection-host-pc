@@ -1,0 +1,25 @@
+# 工业缺陷检测上位机（Host PC）运行依赖
+# 环境: Python 3.13 (Anaconda base)
+# 安装: pip install -r requirements.txt
+
+# ---- 核心 UI ----
+PyQt5==5.15.11
+
+# ---- 系统监控（运行日志页系统状态） ----
+psutil==7.0.0
+
+# ---- 串口通信 ----
+pyserial==3.5
+
+# ---- 图像处理 ----
+opencv-python==4.13.0.92
+numpy==2.3.5
+
+# ---- 统计图表（历史记录页 A4 趋势/饼图） ----
+matplotlib==3.10.6
+
+# ---- 本地模型推理（.onnx，CPU） ----
+onnxruntime==1.26.0
+
+# ---- 本地模型推理（.pt，可选，需训练环境） ----
+# ultralytics==8.4.x

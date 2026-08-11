@@ -1,0 +1,400 @@
+"""
+P1 实时检测页（设计稿图 1）
+左栏：相机设置 / 检测参数 / ROI 设置 / 开始停止 / 保存图像
+中部：实时预览（工具栏 + 预览区：ROI 绿框、缺陷红框、NG 浮窗）
+右栏：检测结果 KPI + 当前结果详情
+底部：检测历史 | 通信设置+存储设置+模型设置 | 运行日志
+"""
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
+    QDoubleSpinBox, QSpinBox, QLineEdit, QTabWidget, QTextEdit, QDialog,
+    QGridLayout, QSizePolicy, QFileDialog, QTableWidgetItem, QHeaderView
+)
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor
+
+from components.common_widgets import (
+    Card, KPICard, StatusLight, StyledTable, form_row
+)
+from components.image_preview import ImagePreview
+from components.roi_editor import RoiEditDialog
+
+_LBL = "color:#cbd5e1; font-size:16px; background:transparent;"
+
+
+def _lbl(text):
+    l = QLabel(text)
+    l.setStyleSheet(_LBL)
+    return l
+
+
+class RealtimeDetectPage(QWidget):
+    start_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
+    save_image_requested = pyqtSignal(str)
+    model_mgr_requested = pyqtSignal()
+    load_model_requested = pyqtSignal(str)
+    roi_changed = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rois = []
+        self._build()
+
+    # ================= 布局 =================
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        top.addLayout(self._build_left(), 3)
+        top.addLayout(self._build_center(), 6)
+        top.addLayout(self._build_right(), 4)
+        root.addLayout(top, 6)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        bottom.addLayout(self._build_history(), 5)
+        bottom.addLayout(self._build_mid_bottom(), 4)
+        bottom.addLayout(self._build_mini_log(), 4)
+        root.addLayout(bottom, 4)
+
+    # ---------- 左栏 ----------
+    def _build_left(self):
+        col = QVBoxLayout()
+        col.setSpacing(6)
+
+        cam = Card("相机设置")
+        self.combo_camera = QComboBox()
+        self.combo_camera.addItems(["相机 01", "相机 02"])
+        self.spin_exposure = QDoubleSpinBox()
+        self.spin_exposure.setRange(0.1, 1000)
+        self.spin_exposure.setValue(10.0)
+        self.spin_gain = QDoubleSpinBox()
+        self.spin_gain.setRange(0, 48)
+        self.spin_gain.setValue(2.0)
+        self.spin_bright = QSpinBox()
+        self.spin_bright.setRange(0, 255)
+        self.spin_bright.setValue(128)
+        for lbl, w in (("相机选择", self.combo_camera), ("曝光时间 (ms)", self.spin_exposure),
+                       ("增益 (dB)", self.spin_gain), ("光源亮度", self.spin_bright)):
+            cam.body.addLayout(form_row(lbl, w, 110))
+        col.addWidget(cam)
+
+        det = Card("检测参数")
+        self.spin_conf = QDoubleSpinBox()
+        self.spin_conf.setRange(0.05, 1.0)
+        self.spin_conf.setSingleStep(0.05)
+        self.spin_conf.setValue(0.85)
+        self.spin_area = QSpinBox()
+        self.spin_area.setRange(0, 100000)
+        self.spin_area.setValue(50)
+        det.body.addLayout(form_row("置信度阈值", self.spin_conf, 110))
+        det.body.addLayout(form_row("最小缺陷面积 (px)", self.spin_area, 110))
+        col.addWidget(det)
+
+        roi = Card("ROI设置")
+        self._roi_rows = QVBoxLayout()
+        self._roi_rows.setSpacing(6)
+        roi.body.addLayout(self._roi_rows)
+        btn_add = QPushButton("添加ROI")
+        btn_add.clicked.connect(self._add_roi)
+        roi.body.addWidget(btn_add)
+        col.addWidget(roi)
+
+        btn_row = QHBoxLayout()
+        self.btn_start = QPushButton("▶  开始检测")
+        self.btn_start.setObjectName("btnPrimary")
+        self.btn_start.setFixedHeight(36)
+        self.btn_start.clicked.connect(self.start_requested)
+        self.btn_stop = QPushButton("■  停止检测")
+        self.btn_stop.setObjectName("btnDanger")
+        self.btn_stop.setFixedHeight(36)
+        self.btn_stop.clicked.connect(self.stop_requested)
+        btn_row.addWidget(self.btn_start)
+        btn_row.addWidget(self.btn_stop)
+        col.addLayout(btn_row)
+
+        self.btn_save = QPushButton("◉  保存图像")
+        self.btn_save.setFixedHeight(36)
+        self.btn_save.clicked.connect(self._on_save_image)
+        col.addWidget(self.btn_save)
+        col.addStretch()
+        return col
+
+    # ---------- 中部预览 ----------
+    def _build_center(self):
+        col = QVBoxLayout()
+        card = Card("实时预览")
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        self.preview = ImagePreview()
+
+        def tbtn(txt, tip, cb, w=34):
+            b = QPushButton(txt)
+            b.setObjectName("iconBtn")
+            b.setFixedSize(w, 28)
+            b.setToolTip(tip)
+            b.clicked.connect(cb)
+            bar.addWidget(b)
+            return b
+
+        tbtn("▶", "播放", lambda: self.start_requested.emit())
+        tbtn("■", "停止", lambda: self.stop_requested.emit())
+        tbtn("抓图", "抓图保存", self._on_save_image, 44)
+        tbtn("全屏", "全屏预览", self._toggle_fullscreen, 44)
+        bar.addStretch()
+        tbtn("−", "缩小", lambda: self._zoom(-0.1))
+        self.zoom_lbl = QLabel("100%")
+        self.zoom_lbl.setStyleSheet("color:#94a3b8; background:transparent;")
+        self.zoom_lbl.setFixedWidth(44)
+        self.zoom_lbl.setAlignment(Qt.AlignCenter)
+        bar.addWidget(self.zoom_lbl)
+        tbtn("＋", "放大", lambda: self._zoom(0.1))
+        bar.addStretch()
+        tbtn("网格", "网格", lambda: None, 44)
+        tbtn("分屏", "分屏", lambda: None, 44)
+        card.body.addLayout(bar)
+        card.body.addWidget(self.preview, stretch=1)
+        col.addWidget(card, stretch=1)
+        return col
+
+    # ---------- 右栏 ----------
+    def _build_right(self):
+        col = QVBoxLayout()
+        card = Card("检测结果")
+
+        kpi = QHBoxLayout()
+        self.kpi_total = KPICard("总数", 0)
+        self.kpi_ok = KPICard("OK", 0, "#22c55e")
+        self.kpi_ng = KPICard("NG", 0, "#ef4444")
+        self.kpi_yield = KPICard("良率", "--")
+        for k in (self.kpi_total, self.kpi_ok, self.kpi_ng, self.kpi_yield):
+            kpi.addWidget(k)
+        card.body.addLayout(kpi)
+
+        card.body.addWidget(_lbl("当前结果详情"))
+        self.detail_table = StyledTable(["项目", "值"])
+        self.detail_table.horizontalHeader().setVisible(False)
+        self.detail_table.setColumnWidth(0, 90)
+        self._detail_rows = {}
+        for key in ("产品", "结果", "缺陷类型", "面积 (px)", "置信度", "时间", "图像路径"):
+            row = self.detail_table.rowCount()
+            self.detail_table.insertRow(row)
+            k = QTableWidgetItem(key)
+            k.setForeground(QColor("#94a3b8"))
+            self.detail_table.setItem(row, 0, k)
+            v = QTableWidgetItem("--")
+            self.detail_table.setItem(row, 1, v)
+            self._detail_rows[key] = v
+        self.detail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.detail_table.setColumnWidth(0, 110)
+        card.body.addWidget(self.detail_table, stretch=1)
+        col.addWidget(card, stretch=1)
+        return col
+
+    # ---------- 底部：历史 ----------
+    def _build_history(self):
+        col = QVBoxLayout()
+        card = Card("检测历史")
+        self.history_table = StyledTable(["时间", "产品", "结果", "缺陷类型", "图像路径"])
+        card.body.addWidget(self.history_table, stretch=1)
+        col.addWidget(card, stretch=1)
+        return col
+
+    # ---------- 底部：通信/存储/模型 ----------
+    def _build_mid_bottom(self):
+        col = QVBoxLayout()
+        col.setSpacing(10)
+
+        comm = Card("通信设置")
+        self.comm_tabs = QTabWidget()
+        plc_tab = QWidget()
+        pl = QVBoxLayout(plc_tab)
+        pl.setContentsMargins(6, 6, 6, 6)
+        self.combo_proto = QComboBox()
+        self.combo_proto.addItems(["Modbus TCP"])
+        self.edit_plc_ip = QLineEdit("192.168.1.200")
+        self.spin_plc_port = QSpinBox()
+        self.spin_plc_port.setRange(1, 65535)
+        self.spin_plc_port.setValue(2000)
+        self.spin_plc_hb = QSpinBox()
+        self.spin_plc_hb.setRange(100, 10000)
+        self.spin_plc_hb.setValue(500)
+        self.light_plc_mini = StatusLight("已连接")
+        for lbl, w in (("通信协议", self.combo_proto), ("服务器IP", self.edit_plc_ip),
+                       ("端口号", self.spin_plc_port), ("心跳周期 (ms)", self.spin_plc_hb)):
+            pl.addLayout(form_row(lbl, w))
+        pl.addWidget(self.light_plc_mini)
+        ser_tab = QWidget()
+        sl = QVBoxLayout(ser_tab)
+        sl.setContentsMargins(6, 6, 6, 6)
+        sl.addWidget(_lbl("串口参数在「通信设置」页配置"))
+        self.comm_tabs.addTab(plc_tab, "PLC通信")
+        self.comm_tabs.addTab(ser_tab, "串口通信")
+        comm.body.addWidget(self.comm_tabs)
+        col.addWidget(comm)
+
+        row = QHBoxLayout()
+        store = Card("存储设置")
+        self.edit_save_path = QLineEdit("D:/Inspect/Images")
+        self.edit_save_path.setReadOnly(True)
+        self.combo_clean = QComboBox()
+        self.combo_clean.addItems(["磁盘空间 < 10% 时删除", "保留最近 30 天", "不清理"])
+        store.body.addLayout(form_row("保存路径", self.edit_save_path, 70))
+        store.body.addLayout(form_row("自动清理", self.combo_clean, 70))
+        row.addWidget(store)
+
+        model = Card("模型设置")
+        self.combo_model = QComboBox()
+        self.combo_model.addItems(["Product_A_v1"])
+        btn_load = QPushButton("加载模型")
+        btn_load.clicked.connect(
+            lambda: self.load_model_requested.emit(self.combo_model.currentText()))
+        btn_mgr = QPushButton("模型管理")
+        btn_mgr.clicked.connect(self.model_mgr_requested)
+        mrow = QHBoxLayout()
+        mrow.addWidget(btn_load)
+        mrow.addWidget(btn_mgr)
+        model.body.addLayout(form_row("当前模型", self.combo_model, 70))
+        model.body.addLayout(mrow)
+        row.addWidget(model)
+        col.addLayout(row)
+        col.addStretch()
+        return col
+
+    # ---------- 底部：mini 日志 ----------
+    def _build_mini_log(self):
+        col = QVBoxLayout()
+        card = Card("运行日志")
+        self.mini_log = QTextEdit()
+        self.mini_log.setReadOnly(True)
+        card.body.addWidget(self.mini_log, stretch=1)
+        col.addWidget(card, stretch=1)
+        return col
+
+    # ================= ROI =================
+    def set_rois(self, rois: list):
+        self._rois = rois
+        self._rebuild_roi_rows()
+        self.preview.set_rois(rois)
+
+    def set_cur_model(self, name: str):
+        if self.combo_model.findText(name) < 0:
+            self.combo_model.addItem(name)
+        self.combo_model.setCurrentText(name)
+
+    def get_rois(self) -> list:
+        return self._rois
+
+    def _rebuild_roi_rows(self):
+        while self._roi_rows.count():
+            item = self._roi_rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for i, roi in enumerate(self._rois):
+            row = QHBoxLayout()
+            row.addWidget(_lbl(f"ROI {i + 1}"))
+            combo = QComboBox()
+            combo.addItems(["启用", "禁用"])
+            combo.setCurrentIndex(0 if roi.get("enabled", True) else 1)
+            combo.currentIndexChanged.connect(
+                lambda idx, r=roi: self._on_roi_toggle(r, idx == 0))
+            row.addWidget(combo, 1)
+            be = QPushButton("编辑")
+            be.setObjectName("iconBtn")
+            be.setFixedSize(40, 26)
+            be.clicked.connect(lambda _=False, r=roi: self._edit_roi(r))
+            bd = QPushButton("删除")
+            bd.setObjectName("iconBtn")
+            bd.setFixedSize(40, 26)
+            bd.clicked.connect(lambda _=False, r=roi: self._del_roi(r))
+            row.addWidget(be)
+            row.addWidget(bd)
+            self._roi_rows.addLayout(row)
+
+    def _on_roi_toggle(self, roi, enabled: bool):
+        roi["enabled"] = enabled
+        self.preview.set_rois(self._rois)
+        self.roi_changed.emit(self._rois)
+
+    def _edit_roi(self, roi):
+        dlg = RoiEditDialog(roi, self, image=self.preview.get_image())
+        if dlg.exec_() == QDialog.Accepted:
+            roi.update(dlg.values())
+            self.preview.set_rois(self._rois)
+            self.roi_changed.emit(self._rois)
+
+    def _del_roi(self, roi):
+        if roi in self._rois:
+            self._rois.remove(roi)
+            self._rebuild_roi_rows()
+            self.preview.set_rois(self._rois)
+            self.roi_changed.emit(self._rois)
+
+    def _add_roi(self):
+        self._rois.append({"name": f"ROI {len(self._rois) + 1}", "enabled": True,
+                           "x": 100, "y": 100, "w": 200, "h": 200})
+        self._rebuild_roi_rows()
+        self.preview.set_rois(self._rois)
+        self.roi_changed.emit(self._rois)
+
+    # ================= 数据更新 =================
+    def update_image(self, qimg):
+        self.preview.set_image(qimg)
+
+    def update_detections(self, dets: list):
+        self.preview.set_detections(dets)
+
+    def update_kpi(self, total, ok, ng, yield_rate):
+        self.kpi_total.set_value(total)
+        self.kpi_ok.set_value(ok)
+        self.kpi_ng.set_value(ng)
+        self.kpi_yield.set_value(f"{yield_rate:.1f}%")
+
+    def update_detail(self, product, result, defect_type, area, conf, ts, path):
+        from PyQt5.QtGui import QColor
+        vals = {"产品": product, "结果": result, "缺陷类型": defect_type,
+                "面积 (px)": area, "置信度": conf, "时间": ts, "图像路径": path}
+        for k, v in vals.items():
+            item = self._detail_rows[k]
+            item.setText(str(v))
+            if k == "结果":
+                item.setForeground(QColor("#ef4444") if v == "NG" else QColor("#22c55e"))
+
+    def add_history(self, values: list):
+        colors = {2: "#ef4444"} if values[2] == "NG" else {2: "#22c55e"}
+        self.history_table.add_row(values, colors)
+
+    def append_mini_log(self, level: str, msg: str):
+        import time as _t
+        color = {"INFO": "#22c55e", "WARN": "#f59e0b",
+                 "ERROR": "#ef4444"}.get(level, "#94a3b8")
+        ts = _t.strftime("%H:%M:%S")
+        self.mini_log.append(
+            f'<span style="color:#64748b">{ts}</span> '
+            f'<span style="color:{color}">[{level}] {msg}</span>')
+        self.mini_log.verticalScrollBar().setValue(
+            self.mini_log.verticalScrollBar().maximum())
+
+    def set_plc_light(self, on: bool):
+        self.light_plc_mini.set_status(1 if on else 0, "已连接" if on else "未连接")
+
+    # ================= 事件 =================
+    def _on_save_image(self):
+        path, _ = QFileDialog.getSaveFileName(self, "保存图像", "capture.png",
+                                              "PNG (*.png)")
+        if path:
+            self.save_image_requested.emit(path)
+
+    def _zoom(self, delta: float):
+        self.preview.zoom_by(delta)
+        self.zoom_lbl.setText(f"{int(self.preview.get_zoom() * 100)}%")
+
+    def _toggle_fullscreen(self):
+        if self.preview.isFullScreen():
+            self.preview.showNormal()
+        else:
+            self.preview.showFullScreen()
