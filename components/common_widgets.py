@@ -194,7 +194,7 @@ def form_row(label: str, widget, label_w: int = 100) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setSpacing(8)
     lbl = QLabel(label)
-    lbl.setStyleSheet("color:#cbd5e1; font-size:16px; background:transparent;")
+    lbl.setStyleSheet("color:#cbd5e1; font-size:18px; background:transparent;")
     lbl.setFixedWidth(label_w)
     row.addWidget(lbl)
     if isinstance(widget, QLayout):

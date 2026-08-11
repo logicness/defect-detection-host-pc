@@ -32,6 +32,7 @@ class RealtimeDetectPage(QWidget):
     start_requested = pyqtSignal()
     stop_requested = pyqtSignal()
     save_image_requested = pyqtSignal(str)
+    local_image_requested = pyqtSignal()
     model_mgr_requested = pyqtSignal()
     load_model_requested = pyqtSignal(str)
     roi_changed = pyqtSignal(list)
@@ -80,7 +81,7 @@ class RealtimeDetectPage(QWidget):
         self.spin_bright.setValue(128)
         for lbl, w in (("相机选择", self.combo_camera), ("曝光时间 (ms)", self.spin_exposure),
                        ("增益 (dB)", self.spin_gain), ("光源亮度", self.spin_bright)):
-            cam.body.addLayout(form_row(lbl, w, 110))
+            cam.body.addLayout(form_row(lbl, w, 160))
         col.addWidget(cam)
 
         det = Card("检测参数")
@@ -91,8 +92,8 @@ class RealtimeDetectPage(QWidget):
         self.spin_area = QSpinBox()
         self.spin_area.setRange(0, 100000)
         self.spin_area.setValue(50)
-        det.body.addLayout(form_row("置信度阈值", self.spin_conf, 110))
-        det.body.addLayout(form_row("最小缺陷面积 (px)", self.spin_area, 110))
+        det.body.addLayout(form_row("置信度阈值", self.spin_conf, 160))
+        det.body.addLayout(form_row("最小缺陷面积 (px)", self.spin_area, 160))
         col.addWidget(det)
 
         roi = Card("ROI设置")
@@ -105,22 +106,30 @@ class RealtimeDetectPage(QWidget):
         col.addWidget(roi)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(12, 0, 0, 0)
         self.btn_start = QPushButton("▶  开始检测")
         self.btn_start.setObjectName("btnPrimary")
-        self.btn_start.setFixedHeight(36)
+        self.btn_start.setFixedHeight(40)
         self.btn_start.clicked.connect(self.start_requested)
         self.btn_stop = QPushButton("■  停止检测")
         self.btn_stop.setObjectName("btnDanger")
-        self.btn_stop.setFixedHeight(36)
+        self.btn_stop.setFixedHeight(40)
         self.btn_stop.clicked.connect(self.stop_requested)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_stop)
         col.addLayout(btn_row)
 
+        btn_row2 = QHBoxLayout()
+        btn_row2.setContentsMargins(12, 0, 0, 0)
+        self.btn_local_image = QPushButton("⌕ 本地图片")
+        self.btn_local_image.setFixedHeight(40)
+        self.btn_local_image.clicked.connect(lambda: self.local_image_requested.emit())
         self.btn_save = QPushButton("◉  保存图像")
-        self.btn_save.setFixedHeight(36)
+        self.btn_save.setFixedHeight(40)
         self.btn_save.clicked.connect(self._on_save_image)
-        col.addWidget(self.btn_save)
+        btn_row2.addWidget(self.btn_local_image)
+        btn_row2.addWidget(self.btn_save)
+        col.addLayout(btn_row2)
         col.addStretch()
         return col
 
