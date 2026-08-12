@@ -353,9 +353,11 @@ class RealtimeDetectPage(QWidget):
         self.combo_model = FocusComboBox()
         self.combo_model.addItems(["Product_A_v1"])
         btn_load = QPushButton("加载模型")
+        btn_load.setToolTip("选择并加载检测模型（查看详情 / 切换模型）")
         btn_load.clicked.connect(
-            lambda: self.load_model_requested.emit(self.combo_model.currentText()))
+            lambda _=False: self.load_model_requested.emit(self.combo_model.currentText()))
         btn_mgr = QPushButton("模型管理")
+        btn_mgr.setToolTip("添加 / 扫描 / 删除 / 配置模型")
         btn_mgr.clicked.connect(self.model_mgr_requested)
         mrow = QHBoxLayout()
         mrow.addWidget(btn_load)

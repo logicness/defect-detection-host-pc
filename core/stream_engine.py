@@ -20,16 +20,19 @@ class StreamEngine(QObject):
     log_message = pyqtSignal(str, str)
 
     def __init__(self, frame_source: FrameSource = None,
-                 infer_mode: str = "sim", max_fps: float = 15.0):
+                 infer_mode: str = "none", max_fps: float = 15.0):
         super().__init__()
         self.frame_source = frame_source or SimFrameSource()
-        self.infer_mode = infer_mode  # "sim" | "tcp" | "local"
+        # infer_mode: "none" | "tcp" | "local" | "sim"
+        # 默认 none，避免未配置时启动模拟演示
+        self.infer_mode = infer_mode
         self.max_fps = max_fps
         self._frame_interval = 1.0 / max_fps if max_fps > 0 else 0
         self._infer_cb = None  # tcp 模式回调: cb(frame) -> None（结果异步经 controller 回传）
         self._local_session = None  # local 模式：onnx session
         self._local_conf = 0.25
         self._local_iou = 0.45
+        self._warned_none_mode = False  # 仅提示一次
         self._running = False
         self._thread = None
         self._stop_evt = threading.Event()
@@ -68,6 +71,7 @@ class StreamEngine(QObject):
             return
         self._running = True
         self._stop_evt.clear()
+        self._warned_none_mode = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.state_changed.emit(True)
@@ -96,6 +100,7 @@ class StreamEngine(QObject):
                     break
 
                 if self.infer_mode == "sim":
+                    # sim 模式仍保留，仅用于开发调试；主流程 _on_start 已禁止直接启动 sim
                     dets = sim_detect(frame, self.frame_source)
                     self.result_received.emit({"detections": dets, "frame": frame})
                 elif self.infer_mode == "local" and self._local_session is not None:
@@ -105,6 +110,12 @@ class StreamEngine(QObject):
                     self.result_received.emit({"detections": dets, "frame": frame})
                 elif self._infer_cb:
                     self._infer_cb(frame)  # tcp：结果异步经 controller 回传
+                else:
+                    # "none" 或其他未配置模式：只预览，不生成检测结果
+                    if not self._warned_none_mode:
+                        self._warned_none_mode = True
+                        self.log_message.emit(
+                            "WARN", "检测模式未配置，仅预览无结果")
 
                 self.frame_ready.emit(frame)
 

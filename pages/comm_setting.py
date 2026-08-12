@@ -6,7 +6,7 @@ PLC通信(Modbus TCP) | I/O信号映射表
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QCheckBox, QTextEdit, QSizePolicy
+    QLineEdit, QCheckBox, QTextEdit, QSizePolicy, QMessageBox, QApplication
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -25,6 +25,12 @@ def _style_input(w):
     w.setFixedHeight(36)
     w.setStyleSheet("font-size:16px;")
     return w
+
+
+def _popup(parent, title: str, text: str):
+    """信息弹窗（offscreen 无头环境跳过，避免崩溃）"""
+    if QApplication.platformName() != "offscreen":
+        QMessageBox.information(parent, title, text)
 
 
 class CommSettingPage(QWidget):
@@ -285,6 +291,8 @@ class CommSettingPage(QWidget):
             self.serial.close()
             self.light_ser.set_status(0, "未连接")
             self.btn_ser_open.setText("打开串口")
+            _popup(self, "串口已关闭",
+                   f"串口 {self.combo_port.currentText()} 已关闭。")
         else:
             parity_map = {"None": "N", "Even": "E", "Odd": "O"}
             ok = self.serial.open(
@@ -294,10 +302,21 @@ class CommSettingPage(QWidget):
             if ok:
                 self.light_ser.set_status(1, "已连接")
                 self.btn_ser_open.setText("关闭串口")
+                _popup(self, "串口已打开",
+                       f"串口 {self.combo_port.currentText()} "
+                       f"@{self.combo_baud.currentText()} 打开成功。")
+            else:
+                _popup(self, "打开失败",
+                       f"无法打开串口 {self.combo_port.currentText()}。\n\n"
+                       "请检查：端口是否被占用、驱动是否正常、设备是否连接。")
 
     def _send_test(self):
         text = self.edit_tx.text().strip()
         if not text:
+            _popup(self, "发送失败", "发送内容为空，请先输入要发送的数据。")
+            return
+        if not self.serial.is_open:
+            _popup(self, "发送失败", "串口未打开，请先点击「打开串口」。")
             return
         if self.chk_hex.isChecked():
             ok = self.serial.send_hex(text)
@@ -305,6 +324,8 @@ class CommSettingPage(QWidget):
         else:
             ok = self.serial.send(text.encode("utf-8"))
             self.append_txrx(f"[TX] {text}") if ok else None
+        if not ok:
+            _popup(self, "发送失败", "串口写入失败，请检查连接后重试。")
 
     def _on_serial_rx(self, data: bytes):
         if self.chk_hex.isChecked():

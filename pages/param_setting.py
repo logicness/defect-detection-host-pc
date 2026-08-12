@@ -36,6 +36,7 @@ class ParamSettingPage(QWidget):
     save_config_requested = pyqtSignal(dict)
     reset_requested = pyqtSignal()
     load_model_requested = pyqtSignal(str)
+    model_mgr_requested = pyqtSignal()       # 打开模型管理对话框
     roi_changed = pyqtSignal(list)
 
     def __init__(self, parent=None):
@@ -152,8 +153,9 @@ class ParamSettingPage(QWidget):
         btn_load.setObjectName("btnPrimary")
         btn_load.setFixedHeight(40)
         btn_load.setStyleSheet("font-size:16px;")
+        btn_load.setToolTip("选择并加载检测模型（查看详情 / 切换模型）")
         btn_load.clicked.connect(
-            lambda: self.load_model_requested.emit(self.edit_cur_model.text()))
+            lambda _=False: self.load_model_requested.emit(self.edit_cur_model.text()))
         mrow = QHBoxLayout()
         mrow.addStretch()
         mrow.addWidget(btn_load)

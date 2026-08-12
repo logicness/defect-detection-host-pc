@@ -6,9 +6,9 @@ Card / KPICard / StatusLight / Toggle / StyledTable / SegGroup / form 行助手
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QPushButton, QAbstractButton, QHeaderView, QWidget, QSizePolicy,
-    QSpinBox, QDoubleSpinBox, QComboBox
+    QSpinBox, QDoubleSpinBox, QComboBox, QDateEdit, QTimeEdit
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QDate, QTime, QDateTime
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 
@@ -310,3 +310,51 @@ class Feedback:
     def error(text: str, title: str = "错误"):
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.critical(Feedback._app(), title, text)
+
+
+# ---------- 日期时间选择器 ----------
+class DateTimePicker(QWidget):
+    """组合日期选择 + 时分秒输入，解决 QDateTimeEdit 时间难选、宽度不够的问题"""
+
+    dateTimeChanged = pyqtSignal(QDateTime)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setFixedWidth(130)
+
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm:ss")
+        self.time_edit.setFixedWidth(90)
+
+        for w in (self.date_edit, self.time_edit):
+            w.setStyleSheet(
+                "QDateEdit, QTimeEdit {"
+                "  background-color: #1e293b; color: #f1f5f9;"
+                "  border: 1px solid #334155; border-radius: 4px;"
+                "  padding: 4px 6px; font-size: 14px;"
+                "}"
+                "QDateEdit::drop-down, QTimeEdit::drop-down { border: none; width: 20px; }"
+            )
+
+        self.date_edit.dateChanged.connect(self._emit)
+        self.time_edit.timeChanged.connect(self._emit)
+
+        lay.addWidget(self.date_edit)
+        lay.addWidget(self.time_edit)
+
+    def _emit(self):
+        self.dateTimeChanged.emit(self.dateTime())
+
+    def dateTime(self) -> QDateTime:
+        return QDateTime(self.date_edit.date(), self.time_edit.time())
+
+    def setDateTime(self, dt: QDateTime):
+        self.date_edit.setDate(dt.date())
+        self.time_edit.setTime(dt.time())

@@ -2,14 +2,13 @@
 """
 本地图片检测对话框（增强版，对齐 Nano 模型库联动）
 =================================================
-- 选择任意本地图片 → 本地推理（有本地模型走 onnx/pt 真实推理；无模型走模拟演示）
+- 选择任意本地图片 → 本地推理（有本地模型走 onnx/pt 真实推理；无模型/Nano 未连接时明确提示）
 - 模型选择：当前本地模型 / 我的模型库 / 浏览 .onnx .pt 文件（对话框内随时切换）
 - 检测结果叠加显示（绿=ROI，红=缺陷框），支持保存标注图
 - 结果经 result_committed 信号交给 main 统一入管线（KPI/写库）
 """
 import os
 import time
-import random
 from datetime import datetime
 
 import cv2
@@ -26,26 +25,8 @@ from components.common_widgets import Card, StatusLight, FocusComboBox
 from components import model_library as mlib
 
 _SAVE_DIR = "D:/Inspect/LocalDetect"
-_SIM_CLASSES = ["scratches", "crazing", "inclusion", "patches"]
 _BROWSE_TAG = "__BROWSE__"
 _NANO_TAG = "__NANO__"
-_NANO_TAG = "__NANO__"
-
-
-def _sim_detect_on_image(frame) -> list:
-    """无模型时的模拟演示：在图片上生成 1~2 个随机缺陷框（UI 格式）"""
-    h, w = frame.shape[:2]
-    n = random.randint(1, 2)
-    dets = []
-    for _ in range(n):
-        bw = max(20, int(w * random.uniform(0.08, 0.16)))
-        bh = max(16, int(h * random.uniform(0.06, 0.12)))
-        x1 = random.randint(0, max(1, w - bw - 1))
-        y1 = random.randint(0, max(1, h - bh - 1))
-        cls = random.choice(_SIM_CLASSES)
-        conf = round(random.uniform(0.82, 0.98), 2)
-        dets.append((cls, conf, x1, y1, x1 + bw, y1 + bh))
-    return dets
 
 
 class LocalImageDetectDialog(QDialog):
@@ -194,7 +175,8 @@ class LocalImageDetectDialog(QDialog):
         self.combo_model.blockSignals(True)
         self.combo_model.clear()
         # 条目格式：(显示文本, 模型路径 或 特殊标记)
-        entries = [("模拟演示（未设置模型）", "")]
+        # 不再提供「模拟演示」选项；无模型时选择框第一项为提示项
+        entries = [("请先选择本地模型", "")]
         if self._tcp and getattr(self._tcp, "is_connected", False):
             entries.append(("Nano 推理（下位机）", _NANO_TAG))
         if self._model and os.path.isfile(self._model):
@@ -263,7 +245,7 @@ class LocalImageDetectDialog(QDialog):
                 self._nano_connected = True
                 self.light_model.set_status(1, "Nano 推理模式")
             else:
-                self.light_model.set_status(2, "Nano 未连接，将使用模拟演示")
+                self.light_model.set_status(2, "Nano 未连接，请先连接或选择本地模型")
                 self._model = ""
             return
 
@@ -275,15 +257,15 @@ class LocalImageDetectDialog(QDialog):
                 self._infer.error_ready.connect(self._on_infer_error)
                 self.light_model.set_status(
                     1, f"模型: {os.path.basename(self._model)}")
-            except Exception:
+            except Exception as e:
                 self._infer = None
                 self.light_model.set_status(
-                    2, "模型加载失败，将使用模拟演示")
+                    2, f"模型加载失败: {e}")
         elif self._model:
             self._model = ""
-            self.light_model.set_status(2, "模型文件不存在，将使用模拟演示")
+            self.light_model.set_status(2, "模型文件不存在，请先选择模型")
         else:
-            self.light_model.set_status(2, "模拟演示模式（未设置本地模型）")
+            self.light_model.set_status(2, "未设置本地模型，检测前请先选择模型")
 
     # ---------------- 选图 ----------------
     def _on_pick(self):
@@ -332,6 +314,11 @@ class LocalImageDetectDialog(QDialog):
     # ---------------- 检测 ----------------
     def _on_detect(self):
         if self._frame is None:
+            self.lbl_result.setText("结果: 未选择图片")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "本地图片检测",
+                    "当前未选择图片，请先点击「选择图片...」加载要检测的图片。")
             return
         if self._model == _NANO_TAG and self._tcp is not None and self._tcp.is_connected:
             # Nano 推理：发送图片到下位机，结果异步回传
@@ -354,11 +341,13 @@ class LocalImageDetectDialog(QDialog):
             self.btn_detect.setEnabled(False)
             self._infer.detect(self._img_path, self._model)
         else:
-            # 模拟演示（同步）
-            t0 = time.perf_counter()
-            dets = _sim_detect_on_image(self._frame)
-            self._last_ms = (time.perf_counter() - t0) * 1000
-            self._show_result(dets)
+            # 无可用模型：明确提示，不再模拟演示
+            self.lbl_result.setText("结果: 未选择模型")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "本地图片检测",
+                    "当前未选择可用的本地模型。\n\n"
+                    "请先选择 .onnx / .pt 模型，或选择 Nano 推理模式后再点击检测。")
 
     def _on_infer_result(self, result: dict):
         self.btn_detect.setEnabled(True)
@@ -433,7 +422,7 @@ class LocalImageDetectDialog(QDialog):
             with open(csv_path, "a", encoding="utf-8-sig") as f:
                 if new:
                     f.write("时间,图片,模型,结果,缺陷数,耗时ms\n")
-                model_name = os.path.basename(self._model) if self._model else "模拟演示"
+                model_name = os.path.basename(self._model) if self._model else "未选择模型"
                 f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},"
                         f"{self._img_path},{model_name},"
                         f"{'NG' if self._dets else 'OK'},"

@@ -10,7 +10,7 @@ import time
 import psutil
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QDateTimeEdit, QProgressBar, QFileDialog, QHeaderView
+    QDateTimeEdit, QProgressBar, QFileDialog, QHeaderView, QMessageBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime
 from PyQt5.QtGui import QColor
@@ -296,3 +296,6 @@ class RunLogPage(QWidget):
             w.writerow(["时间", "级别", "模块", "内容", "代码"])
             for ts, level, module, msg, code in self._logs:
                 w.writerow([ts, _LEVEL_CN.get(level, level), module, msg, code])
+        QMessageBox.information(
+            self, "导出成功",
+            f"已导出 {len(self._logs)} 条日志到：\n{path}")

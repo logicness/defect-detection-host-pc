@@ -22,13 +22,18 @@ from pages import (
     CommSettingPage, RunLogPage
 )
 from core.controller import AppController
-from core.frame_source import SimFrameSource
 from core.stream_engine import StreamEngine
 from core.model_manager_ctl import ModelManagerCtl
 from core.ng_saver import NGSaver
 from core import config as cfg_mod
 
 _EDGE_MARGIN = 6
+
+
+def _popup_info(parent, title: str, text: str):
+    """信息弹窗（offscreen 无头环境跳过，避免崩溃）"""
+    if QApplication.platformName() != "offscreen":
+        QMessageBox.information(parent, title, text)
 
 
 class MainWindow(QMainWindow):
@@ -59,7 +64,8 @@ class MainWindow(QMainWindow):
         self.cfg = cfg_mod.load_config()
         self.controller = AppController()
         self.model_ctl = ModelManagerCtl(self.controller.tcp)
-        self.stream_engine = StreamEngine(infer_mode="sim")
+        # 默认 infer_mode 用 tcp，禁止未配置时误入模拟演示
+        self.stream_engine = StreamEngine(infer_mode="tcp")
         self.ng_saver = NGSaver(self.cfg.get("storage", {}).get(
             "save_path", "D:/Inspect/Images"))
         self._last_frame = None
@@ -190,10 +196,12 @@ class MainWindow(QMainWindow):
         self.page_param.reset_requested.connect(self._on_reset_config)
         self.page_param.roi_changed.connect(self._on_roi_changed)
         self.page_param.load_model_requested.connect(self._on_load_model)
+        self.page_param.model_mgr_requested.connect(self._on_model_mgr)
 
         # 历史页
         self.page_history.query_requested.connect(self._on_history_query)
         self.page_history.export_requested.connect(self._on_history_export)
+        self.page_history.clear_history_requested.connect(self._on_history_clear)
 
         # 通信页
         self.page_comm.plc_connect_requested.connect(self._on_plc_connect)
@@ -244,18 +252,19 @@ class MainWindow(QMainWindow):
                  f"默认本地模型: {os.path.basename(self._local_model)}（选择本地图片即可检测）"))
             msgs.append(("INFO", "模型", "连接开发板后将自动切换为开发板模型"))
         else:
-            msgs.append(("INFO", "系统", "等待连接设备或加载本地图片"))
+            msgs.append(("INFO", "系统", "等待连接设备或加载本地图片；未连接前不会启动模拟检测"))
+        msgs.append(("INFO", "通信", "TCP 未自动连接，请点击「重新连接」手动连接下位机"))
         for lv, mod, msg in msgs:
             self.controller.log_message.emit(lv, mod, msg)
 
     def _auto_connect(self):
-        """启动时自动连接下位机（开发板可能后开机，失败后会持续后台重连）"""
+        """启动时自动连接 PLC；TCP 改为手动连接，避免未开机时持续重试卡进程"""
         t = self.cfg.get("tcp", {})
         self.controller.configure_tcp(
             t.get("host", "192.168.1.101"), t.get("port", 8888),
             heartbeat=t.get("heartbeat", 5), retries=t.get("retries", 3),
             timeout=t.get("timeout", 10))
-        self.controller.connect_tcp()
+        # TCP 不再自动连接：用户点击「重新连接」/模型管理「重新连接」时才连
         self._on_plc_connect()
 
     def _on_plc_connect(self):
@@ -274,41 +283,22 @@ class MainWindow(QMainWindow):
             self._on_stop()
             return
 
-        # 只要已加载本地图片，就优先做单帧推理（用户选图后的预期行为）
+        # 已加载本地图片 → 单帧推理（用户选图后的预期行为）
         if self._local_image is not None:
-            self.stream_engine.stop()
             self._local_image_active = True
             self._detect_local_image()
             return
 
-        # 标记为实时流模式，清除本地图片模式
+        # 没有选择图片、也没有真实相机输入源 → 明确提示，绝不启动模拟流
         self._local_image_active = False
-
-        # 开发板已连接且自动切换生效：走 TCP 推理
-        tcp_on = self.controller.tcp.is_connected and self._nano_active
-        if tcp_on:
-            self.stream_engine.set_infer_callback(self._tcp_infer)
-            self.stream_engine.infer_mode = "tcp"
-            self.stream_engine.set_frame_source(SimFrameSource())
-            self.stream_engine.start()
-            self.page_realtime.set_running(True)
-            self.controller.log_message.emit("INFO", "检测", "开始检测（下位机推理）")
-        else:
-            # 没有连接下位机：明确提示，不再用模拟演示
-            self.controller.log_message.emit(
-                "WARN", "检测", "未连接下位机，无法开始实时检测")
-            if QApplication.platformName() != "offscreen":
-                QMessageBox.information(
-                    self, "开始检测",
-                    "当前未连接下位机，无法开始实时检测。\n\n"
-                    "请进行以下操作之一：\n"
-                    "1. 连接下位机并等待状态栏「模型」变绿\n"
-                    "2. 点击「本地图片」选择一张图片进行单张检测")
-
-    def _tcp_infer(self, frame):
-        ok, buf = cv2.imencode(".jpg", frame)
-        if ok:
-            self.controller.send_image(buf.tobytes())
+        self.controller.log_message.emit(
+            "WARN", "检测", "没有可用的检测输入源，未启动检测")
+        if QApplication.platformName() != "offscreen":
+            QMessageBox.information(
+                self, "开始检测",
+                "当前没有可用的检测输入源，无法开始检测。\n\n"
+                "请先点击「本地图片」选择一张图片进行单张检测。\n\n"
+                "（实时相机检测需接入相机后才可用，当前无相机输入）")
 
     @staticmethod
     def _is_torchscript_model(path: str) -> bool:
@@ -327,13 +317,15 @@ class MainWindow(QMainWindow):
             return False
 
     def _detect_local_image(self):
-        """对本地图片做单帧推理：必须有有效的 .onnx/.pt 本地模型，否则弹窗提示"""
+        """对本地图片做单帧推理：必须有有效的 .onnx/.pt 本地模型，否则弹窗提示。
+
+        推理走 core.local_infer.LocalInferEngine 后台线程（对齐 Nano 项目的
+        「模型管理 → 本地检测」逻辑：异步执行、信号回传、不阻塞 UI）。
+        """
         # 确保不跟实时流同时跑
         if self.stream_engine.is_running:
             self.stream_engine.stop()
-        frame = self._local_image
         path = self._local_image_path
-        t0 = time.perf_counter()
         basename = os.path.basename(path)
 
         # 没有本地模型
@@ -373,61 +365,74 @@ class MainWindow(QMainWindow):
                     "请加载 .onnx 或 .pt 模型后再检测。")
             return
 
-        # 真实本地推理
-        try:
-            if ext == ".onnx":
-                from core.local_infer import load_session, infer_frame
-                session = load_session(self._local_model)
-                dets = infer_frame(session, frame, 0.25, 0.45)
-            else:
-                # 先排除 TorchScript 模型（文件名含 torchscript 或加载后类型不符）
-                if self._is_torchscript_model(self._local_model):
-                    self.controller.log_message.emit(
-                        "WARN", "检测",
-                        f"TorchScript 模型暂不支持本地推理: {os.path.basename(self._local_model)}")
-                    if QApplication.platformName() != "offscreen":
-                        QMessageBox.warning(
-                            self, "本地图片检测",
-                            f"当前模型是 TorchScript 格式：\n{self._local_model}\n\n"
-                            "该格式无法直接用于 PC 本地推理。\n\n"
-                            "请使用以下方式之一解决：\n"
-                            "1. 换成标准的 PyTorch 训练权重 (.pt)\n"
-                            "2. 导出为 ONNX 格式 (.onnx) 后加载\n\n"
-                            "例如：python export.py --weights yolov5s.pt --include onnx")
-                    return
-                from ultralytics import YOLO
-                model = YOLO(self._local_model)
-                results = model.predict(frame, conf=0.25, iou=0.45,
-                                        verbose=False, imgsz=640, device="cpu")
-                r = results[0]
-                dets = []
-                if r.boxes is not None and len(r.boxes) > 0:
-                    boxes = r.boxes.xyxy.cpu().numpy()
-                    confs = r.boxes.conf.cpu().numpy()
-                    cls_ids = r.boxes.cls.cpu().numpy().astype(int)
-                    from core.local_infer import NEU_CLASSES
-                    for box, c, ci in zip(boxes, confs, cls_ids):
-                        cls = NEU_CLASSES[ci] if ci < len(NEU_CLASSES) else f"cls{ci}"
-                        dets.append((cls, float(c), *[float(v) for v in box]))
-        except Exception as e:
+        # .pt 先排除 TorchScript 模型（文件名含 torchscript 或加载后类型不符）
+        if self._is_torchscript_model(self._local_model):
             self.controller.log_message.emit(
-                "ERROR", "检测", f"本地推理失败: {e}")
+                "WARN", "检测",
+                f"TorchScript 模型暂不支持本地推理: {os.path.basename(self._local_model)}")
             if QApplication.platformName() != "offscreen":
                 QMessageBox.warning(
                     self, "本地图片检测",
-                    f"模型推理时出错:\n{e}\n\n"
-                    "请检查模型文件是否完整，或尝试其他 .onnx / .pt 模型。")
+                    f"当前模型是 TorchScript 格式：\n{self._local_model}\n\n"
+                    "该格式无法直接用于 PC 本地推理。\n\n"
+                    "请使用以下方式之一解决：\n"
+                    "1. 换成标准的 PyTorch 训练权重 (.pt)\n"
+                    "2. 导出为 ONNX 格式 (.onnx) 后加载\n\n"
+                    "例如：python export.py --weights yolov5s.pt --include onnx")
             return
 
-        ms = (time.perf_counter() - t0) * 1000
-        # 交给 controller 统一入管线（KPI/写库/历史/预览画框）
-        self.controller.ingest_result(dets, frame, path)
+        # 复用同一个推理引擎（懒加载），结果/错误经信号回主线程
+        if getattr(self, "_local_infer_engine", None) is None:
+            from core.local_infer import LocalInferEngine
+            eng = LocalInferEngine(self)
+            eng.result_ready.connect(self._on_local_infer_result)
+            eng.error_ready.connect(self._on_local_infer_error)
+            self._local_infer_engine = eng
+
+        if self._local_infer_engine.busy:
+            self.controller.log_message.emit(
+                "WARN", "检测", "本地推理正在进行，请稍候")
+            return
+
+        # 启动后台推理（不阻塞 UI），状态先行提示
+        self.status_left.setText(f"本地图片: {basename}　|　推理中...")
+        self.controller.log_message.emit(
+            "INFO", "检测", f"开始本地推理: {basename}（模型 {os.path.basename(self._local_model)}）")
+        self._local_infer_engine.detect(path, self._local_model,
+                                        conf_thres=0.25, iou_thres=0.45)
+
+    def _on_local_infer_result(self, result: dict):
+        """本地推理完成（后台线程回传）→ 转 UI 格式 → 统一入管线（KPI/写库/历史/预览画框）"""
+        from core.local_infer import NEU_CLASSES
+        raw = result.get("detections", [])
+        dets = []
+        for d in raw:
+            box = d.get("box", [0, 0, 0, 0])
+            cid = d.get("class_id", 0)
+            cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+            dets.append((cls, d.get("confidence", 0), *box[:4]))
+        ms = result.get("timing", {}).get("total_ms", 0) or 0
+        path = self._local_image_path or ""
+        basename = os.path.basename(path) or "本地图片"
+
+        self.controller.ingest_result(dets, self._local_image, path)
         self.controller.log_message.emit(
             "INFO", "检测",
             f"本地图片检测完成: {basename} "
             f"({'NG 缺陷×' + str(len(dets)) if dets else 'OK'})  耗时 {ms:.0f} ms")
         self.status_left.setText(
             f"本地图片: {basename}　| 检测完成 {ms:.0f} ms")
+
+    def _on_local_infer_error(self, msg: str):
+        """本地推理失败（后台线程回传）"""
+        self.controller.log_message.emit("ERROR", "检测", f"本地推理失败: {msg}")
+        self.status_left.setText(
+            f"本地图片: {os.path.basename(self._local_image_path) or '--'}　| 推理失败")
+        if QApplication.platformName() != "offscreen":
+            QMessageBox.warning(
+                self, "本地图片检测",
+                f"模型推理时出错:\n{msg}\n\n"
+                "请检查模型文件是否完整，或尝试其他 .onnx / .pt 模型。")
 
     def _on_stop(self):
         """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
@@ -570,6 +575,7 @@ class MainWindow(QMainWindow):
         self.ng_saver.set_save_root(
             merged.get("storage", {}).get("save_path", "D:/Inspect/Images"))
         self.controller.log_message.emit("INFO", "系统", "配置已保存")
+        _popup_info(self, "保存成功", "参数配置已保存，重启后仍会生效。")
 
     def _on_reset_config(self):
         self.cfg = _deep_default()
@@ -578,6 +584,7 @@ class MainWindow(QMainWindow):
         self.page_realtime.set_rois(self.cfg["rois"])
         self.page_param.set_rois(self.cfg["rois"])
         self.controller.log_message.emit("INFO", "系统", "已恢复默认配置")
+        _popup_info(self, "已恢复默认", "所有参数已恢复为默认值。")
 
     def _on_save_path_changed(self, path: str):
         self.cfg.setdefault("storage", {})["save_path"] = path
@@ -585,6 +592,7 @@ class MainWindow(QMainWindow):
         self.ng_saver.set_save_root(path)
         self.page_param.apply_config(self.cfg)
         self.controller.log_message.emit("INFO", "系统", f"保存路径已更新: {path}")
+        _popup_info(self, "已设置", f"图像保存路径已更新：\n{path}")
 
     def _on_params_apply(self, conf, iou):
         rois = [{"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
@@ -593,40 +601,54 @@ class MainWindow(QMainWindow):
             self.controller.tcp.send_control(conf_thres=conf, iou_thres=iou, rois=rois)
             self.controller.log_message.emit(
                 "INFO", "参数", f"已下发参数: conf={conf}, roi×{len(rois)}")
+            _popup_info(self, "应用成功",
+                        f"检测参数已下发到下位机：\n置信度 {conf}，ROI {len(rois)} 个")
         else:
             self.controller.log_message.emit("INFO", "参数",
                                              f"参数已应用（本地）: conf={conf}")
+            _popup_info(self, "应用成功",
+                        f"检测参数已应用（未连接下位机，仅本地生效）：\n置信度 {conf}")
 
     # ================= 模型 =================
-    def _on_load_model(self, name):
-        import os
-        if name and os.path.isfile(name) and \
-                name.lower().endswith((".onnx", ".pt")):
-            # 本地模型：直接走 PC 本地推理（无需 Nano 在线）
-            self._local_model = name
-            self.controller.log_message.emit(
-                "INFO", "模型",
-                f"已选择本地模型 {os.path.basename(name)}，开始检测时启用本地推理")
-            self.title_bar.set_model_tag(os.path.basename(name))
-            return
-        self._local_model = ""
-        if self.controller.tcp.is_connected:
-            self.controller.tcp.load_model(name)
-            self.controller.log_message.emit("INFO", "模型", f"请求加载模型: {name}")
-        else:
-            self.controller.log_message.emit("WARN", "模型", "未连接下位机，模型未切换")
-        self.title_bar.set_model_tag(name)
-
-    def _on_model_mgr(self):
+    def _on_load_model(self, name=""):
+        """「加载模型」入口：打开模型选择对话框，默认显示「选择模型」Tab"""
         from components.model_manager_dialog import ModelManagerDialog
         dlg = ModelManagerDialog(
             self.controller.tcp, self,
             default_model=self._local_model,
-            default_model_dir=self.cfg.get("state", {}).get("last_model_dir", "")
+            default_model_dir=self.cfg.get("state", {}).get("last_model_dir", ""),
+            open_tab="select"
         )
         dlg.local_model_selected.connect(self._on_local_model_selected)
+        dlg.local_model_deleted.connect(self._on_local_model_deleted)
         dlg.reconnect_requested.connect(self._on_model_mgr_reconnect)
         dlg.exec_()
+
+    def _on_model_mgr(self):
+        """「模型管理」入口：打开模型管理对话框，默认显示「模型管理」Tab"""
+        from components.model_manager_dialog import ModelManagerDialog
+        dlg = ModelManagerDialog(
+            self.controller.tcp, self,
+            default_model=self._local_model,
+            default_model_dir=self.cfg.get("state", {}).get("last_model_dir", ""),
+            open_tab="manage"
+        )
+        dlg.local_model_selected.connect(self._on_local_model_selected)
+        dlg.local_model_deleted.connect(self._on_local_model_deleted)
+        dlg.reconnect_requested.connect(self._on_model_mgr_reconnect)
+        dlg.exec_()
+
+    def _on_local_model_deleted(self, path: str):
+        """模型管理对话框中删除了本地模型文件/条目：若正是当前本地模型则清空"""
+        if path and self._local_model == path:
+            self._local_model = ""
+            self._save_state(last_local_model="")
+            self.title_bar.set_model_tag("--")
+            self.controller.log_message.emit(
+                "WARN", "模型", "当前本地模型已被删除，请重新选择模型")
+        else:
+            self.controller.log_message.emit(
+                "INFO", "模型", f"已从模型库移除: {os.path.basename(path)}")
 
     def _on_models_updated(self, data):
         """下位机模型清单变化 → 同步标题栏/页面当前模型"""
@@ -726,6 +748,18 @@ class MainWindow(QMainWindow):
             return
         n = self.controller.db.export_csv(path, **filters)
         self.controller.log_message.emit("INFO", "历史", f"已导出 {n} 条到 {path}")
+        _popup_info(self, "导出成功", f"已导出 {n} 条检测记录到：\n{path}")
+
+    def _on_history_clear(self):
+        """清空所有检测记录与生产统计"""
+        try:
+            n = self.controller.db.clear_all_records()
+            self.controller.log_message.emit("INFO", "历史", f"已清空 {n} 条记录")
+            _popup_info(self, "清空成功", "所有检测记录已清空。")
+            self.page_history._query(1)
+        except Exception as e:
+            self.controller.log_message.emit("ERROR", "历史", f"清空失败: {e}")
+            _popup_info(self, "清空失败", f"清空记录时出错：\n{e}")
 
     # ================= 通信 =================
     def _on_plc_status(self, status):
@@ -741,26 +775,36 @@ class MainWindow(QMainWindow):
         if plc.is_connected:
             try:
                 st = plc.read_status()
+                rtt = getattr(plc, '_last_rtt', 0)
                 self.controller.log_message.emit(
-                    "INFO", "PLC", f"测试通信成功 RTT={getattr(plc, '_last_rtt', 0):.1f}ms")
+                    "INFO", "PLC", f"测试通信成功 RTT={rtt:.1f}ms")
                 self.page_comm.append_txrx(
                     f"[TX] 01 03 00 00 00 01　→　[RX] OK running={st['running']}")
+                _popup_info(self, "通信正常",
+                            f"PLC 通信测试成功，往返延迟 {rtt:.1f} ms")
             except Exception as e:
                 self.controller.log_message.emit("ERROR", "PLC", f"测试通信失败: {e}")
+                _popup_info(self, "通信失败", f"PLC 通信测试失败：\n{e}")
         else:
             self.controller.log_message.emit("WARN", "PLC", "PLC 未连接，无法测试")
+            _popup_info(self, "无法测试", "PLC 未连接，请先在通信设置页连接 PLC。")
 
     def _on_tcp_reconnect(self):
         """手动重新连接下位机推理服务（断开旧线程后立即重连）"""
         self.controller.tcp.disconnect()
         t = self.cfg.get("tcp", {})
+        host = t.get("host", "192.168.1.101")
+        port = t.get("port", 8888)
         self.controller.configure_tcp(
-            t.get("host", "192.168.1.101"), t.get("port", 8888),
+            host, port,
             heartbeat=t.get("heartbeat", 5), retries=t.get("retries", 3),
             timeout=t.get("timeout", 10))
         self.controller.connect_tcp()
         self.controller.log_message.emit(
-            "INFO", "通信", f"正在重新连接下位机 {t.get('host', '192.168.1.101')}:{t.get('port', 8888)}...")
+            "INFO", "通信", f"正在重新连接下位机 {host}:{port}...")
+        _popup_info(self, "重新连接",
+                    f"正在尝试连接下位机 {host}:{port}...\n"
+                    "连接结果请关注右下角运行日志。")
 
     def _on_model_mgr_reconnect(self):
         """模型管理对话框里的重新连接按钮"""
@@ -799,8 +843,11 @@ class MainWindow(QMainWindow):
         if self._last_frame is not None:
             cv2.imwrite(path, self._last_frame)
             self.controller.log_message.emit("INFO", "系统", f"图像已保存: {path}")
+            _popup_info(self, "保存成功", f"图像已保存到：\n{path}")
         else:
             self.controller.log_message.emit("WARN", "系统", "无可用帧，保存失败")
+            _popup_info(self, "保存失败", "当前没有可保存的图像帧。\n\n"
+                        "请先加载本地图片或开始实时检测后再保存。")
 
     def _tick_clock(self):
         self.status_time.setText(
@@ -822,10 +869,10 @@ class MainWindow(QMainWindow):
             self._on_model_mgr()
         elif act == act_about:
             QMessageBox.about(self, "关于",
-                              "工业缺陷检测上位机 v1.1\n"
+                              "工业缺陷检测上位机 v1.2\n"
                               "下位机: RK3568 / Jetson 系列\n"
                               "通信: TCP (4字节长度头 + JSON) / Modbus TCP / 串口\n"
-                              "本地检测: ONNX / PT 模型 或 模拟演示")
+                              "本地检测: ONNX / PT 模型（不再使用模拟演示）")
 
     def _menu_pos(self):
         """菜单弹出位置：标题栏菜单按钮附近"""

@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.bak
 
 # 运行数据（DB/配置，由 tools/seed_demo.py 重新生成）
 data/

@@ -62,9 +62,10 @@ def main():
     shot("01_realtime_idle")
 
     win.page_realtime._zoom(0.0)  # 标签同步
-    win.controller.disconnect_tcp()  # 走查用模拟推理，数据确定
+    win.controller.disconnect_tcp()  # 走查工具：显式启用 sim 推理（仅测试脚本用，主流程已禁用）
+    win.stream_engine.infer_mode = "sim"
     pump(app, 0.3)
-    win.page_realtime.btn_start.click()
+    win.stream_engine.start()
     pump(app, 4.0)
     st = win.controller.get_stats()
     check("开始检测→有推理结果", st["total"] > 0)
@@ -73,7 +74,7 @@ def main():
     check("历史表有行", win.page_realtime.history_table.rowCount() > 0)
     shot("02_realtime_running")
 
-    win.page_realtime.btn_stop.click()
+    win.stream_engine.stop()
     pump(app, 0.5)
     check("停止检测", not win.stream_engine.is_running)
 

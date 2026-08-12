@@ -170,6 +170,13 @@ class DatabaseManager(QObject):
                 "DELETE FROM defect_records WHERE timestamp < ?", (cutoff,))
         return cur.rowcount
 
+    def clear_all_records(self) -> int:
+        """清空所有检测记录与生产统计（慎用）"""
+        with self._lock, self.conn:
+            cur1 = self.conn.execute("DELETE FROM defect_records")
+            cur2 = self.conn.execute("DELETE FROM production_stats")
+        return cur1.rowcount + cur2.rowcount
+
     def close(self):
         with self._lock:
             self.conn.close()

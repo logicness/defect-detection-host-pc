@@ -34,8 +34,10 @@ def main():
     app.processEvents()
     check("主窗口 + 5 页构建", win.tab.count() == 5)
 
-    # 模拟流跑 2.5s
-    win.page_realtime.start_requested.emit()
+    # 模拟流跑 2.5s（测试脚本直接启动引擎并显式启用 sim；
+    # 主流程 _on_start 已禁止通过按钮进入 sim 模式）
+    win.stream_engine.infer_mode = "sim"
+    win.stream_engine.start()
     t0 = time.time()
     while time.time() - t0 < 2.5:
         app.processEvents()
@@ -43,7 +45,7 @@ def main():
     check("实时流运行中", win.stream_engine.is_running)
     check("检测有结果(KPI>0)", win.controller.get_stats()["total"] > 0)
     check("预览有帧", win._last_frame is not None)
-    win.page_realtime.stop_requested.emit()
+    win.stream_engine.stop()
     app.processEvents()
     check("实时流停止", not win.stream_engine.is_running)
 

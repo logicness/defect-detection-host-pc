@@ -9,12 +9,12 @@ import subprocess
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QDateTimeEdit, QFileDialog, QHeaderView
+    QLineEdit, QFileDialog, QHeaderView, QMessageBox, QApplication
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QDateTime
 from PyQt5.QtGui import QImage
 
-from components.common_widgets import Card, KPICard, SegGroup, StyledTable, form_row, FocusComboBox
+from components.common_widgets import Card, KPICard, SegGroup, StyledTable, form_row, FocusComboBox, DateTimePicker
 from components.image_preview import ImagePreview
 from components.stats_charts import TrendChart, DefectPieChart
 
@@ -25,9 +25,16 @@ def _lbl(text):
     return l
 
 
+def _popup(parent, title: str, text: str):
+    """信息弹窗（offscreen 无头环境跳过，避免崩溃）"""
+    if QApplication.platformName() != "offscreen":
+        QMessageBox.information(parent, title, text)
+
+
 class HistoryRecordPage(QWidget):
     query_requested = pyqtSignal(dict, int, int)   # (filters, limit, offset)
     export_requested = pyqtSignal(dict)
+    clear_history_requested = pyqtSignal()         # 请求清空所有检测记录
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,13 +85,9 @@ class HistoryRecordPage(QWidget):
         card = Card("查询条件")
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.dt_from = QDateTimeEdit()
-        self.dt_from.setCalendarPopup(True)
-        self.dt_from.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.dt_from = DateTimePicker()
         self.dt_from.setDateTime(QDateTime.currentDateTime().addDays(-1))
-        self.dt_to = QDateTimeEdit()
-        self.dt_to.setCalendarPopup(True)
-        self.dt_to.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.dt_to = DateTimePicker()
         self.dt_to.setDateTime(QDateTime.currentDateTime())
         self.combo_product = FocusComboBox()
         self.combo_product.addItems(["全部", "Product_A_v1"])
@@ -93,15 +96,16 @@ class HistoryRecordPage(QWidget):
         self.combo_defect.addItems(["全部"])
         self.edit_keyword = QLineEdit()
         self.edit_keyword.setPlaceholderText("请输入关键词")
-        btn_q = QPushButton("🔍 查询".replace("🔍 ", "⌕ "))
+        btn_q = QPushButton("⌕ 查询")
         btn_q.setObjectName("btnPrimary")
         btn_q.clicked.connect(lambda: self._query(1))
         btn_r = QPushButton("↺ 重置")
         btn_r.clicked.connect(self._reset)
         btn_e = QPushButton("⤓ 导出记录")
         btn_e.clicked.connect(lambda: self.export_requested.emit(self.get_filters()))
-        for w in (self.dt_from, self.dt_to):
-            w.setFixedWidth(190)
+        btn_c = QPushButton("🗑 清空记录")
+        btn_c.setToolTip("清空所有检测记录（不可恢复，请先导出备份）")
+        btn_c.clicked.connect(self._on_clear_history)
         row.addWidget(_lbl("开始时间"))
         row.addWidget(self.dt_from)
         row.addWidget(_lbl("结束时间"))
@@ -117,6 +121,7 @@ class HistoryRecordPage(QWidget):
         row.addWidget(btn_q)
         row.addWidget(btn_r)
         row.addWidget(btn_e)
+        row.addWidget(btn_c)
         card.body.addLayout(row)
         return card
 
@@ -314,6 +319,17 @@ class HistoryRecordPage(QWidget):
         self.edit_keyword.clear()
         self._query(1)
 
+    def _on_clear_history(self):
+        """点击清空记录：弹窗确认后通知主程序清空数据库"""
+        if QApplication.platformName() == "offscreen":
+            return
+        reply = QMessageBox.question(
+            self, "清空确认",
+            "确定要清空所有检测记录吗？\n此操作不可恢复，建议先导出备份。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.clear_history_requested.emit()
+
     def _on_select(self):
         rows = self.table.selectedItems()
         if not rows:
@@ -348,10 +364,22 @@ class HistoryRecordPage(QWidget):
 
     def _view_orig(self):
         path = self._drows["图像路径"].text()
-        if path and path != "-" and os.path.exists(path):
+        if not path or path == "-":
+            _popup(self, "无图像", "当前记录没有关联的图像文件。")
+            return
+        if os.path.exists(path):
             os.startfile(path)
+        else:
+            _popup(self, "图像不存在",
+                   f"原图文件不存在或已被移动：\n{path}")
 
     def _open_dir(self):
         path = self._drows["图像路径"].text()
-        if path and path != "-" and os.path.exists(path):
+        if not path or path == "-":
+            _popup(self, "无图像", "当前记录没有关联的图像文件。")
+            return
+        if os.path.exists(path):
             subprocess.run(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            _popup(self, "图像不存在",
+                   f"原图文件不存在或已被移动：\n{path}")
