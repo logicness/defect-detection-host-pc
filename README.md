@@ -1,6 +1,6 @@
-# Industrial Host PC - 工业缺陷检测上位机（RK3568 版）
+# Host PC - 工业缺陷检测上位机（Jetson 版）
 
-工业表面缺陷检测系统的上位机软件（Windows PC 端），配套 RK3568 / Jetson 系列下位机使用。
+工业表面缺陷检测系统的上位机软件（Windows PC 端），配套 Jetson Orin Nano 系列下位机使用。
 UI 严格按 5 张设计稿实现：实时检测 / 参数设置 / 历史记录 / 通信设置 / 运行日志。
 
 ## 功能特性（v1.3）
