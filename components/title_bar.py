@@ -48,27 +48,40 @@ class TitleBar(QWidget):
                 "border-radius:4px; padding:5px 12px; font-size:15px;")
             lay.addWidget(tag)
 
-        # 窗口控制 + 菜单
-        for txt, tip, sig in (("—", "最小化", self.window_minimized),
-                              ("□", "最大化", self.window_maximized),
-                              ("✕", "关闭", self.window_closed)):
-            b = QPushButton(txt)
-            b.setFixedSize(40, 34)
-            b.setToolTip(tip)
-            b.setStyleSheet(
-                "QPushButton{border:none; background:transparent; color:#94a3b8; font-size:16px;}"
-                "QPushButton:hover{background:#1e293b; color:#e2e8f0;}")
-            b.clicked.connect(sig)
-            lay.addWidget(b)
-
+        # 菜单按钮（挪到相机标签右侧）
         menu = QPushButton("≡")
-        menu.setFixedSize(40, 34)
+        menu.setFixedSize(38, 32)
         menu.setToolTip("菜单")
         menu.setStyleSheet(
-            "QPushButton{border:none; background:transparent; color:#e2e8f0; font-size:20px;}"
-            "QPushButton:hover{background:#1e293b;}")
+            "QPushButton{border:none; background:transparent; color:#e2e8f0; font-size:18px;}"
+            "QPushButton:hover{background:#1e293b; border-radius:4px;}")
         menu.clicked.connect(self.menu_requested)
         lay.addWidget(menu)
+
+        # 分隔线：把菜单和窗口控制按钮区分开，更整齐
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color:#334155; background:#334155;")
+        sep.setFixedSize(1, 22)
+        lay.addWidget(sep)
+
+        # 窗口控制按钮：调大图标
+        for txt, tip, sig, fs in (("—", "最小化", self.window_minimized, 18),
+                                  ("□", "最大化", self.window_maximized, 18),
+                                  ("✕", "关闭", self.window_closed, 20)):
+            b = QPushButton(txt)
+            b.setFixedSize(44, 36)
+            b.setToolTip(tip)
+            if txt == "✕":
+                b.setStyleSheet(
+                    f"QPushButton{{border:none; background:transparent; color:#94a3b8; font-size:{fs}px;}}"
+                    f"QPushButton:hover{{background:#ef4444; color:#ffffff; border-radius:4px;}}")
+            else:
+                b.setStyleSheet(
+                    f"QPushButton{{border:none; background:transparent; color:#94a3b8; font-size:{fs}px;}}"
+                    f"QPushButton:hover{{background:#1e293b; color:#e2e8f0; border-radius:4px;}}")
+            b.clicked.connect(sig)
+            lay.addWidget(b)
 
     # ---------- 标签/状态接口 ----------
     def set_model_tag(self, name: str):

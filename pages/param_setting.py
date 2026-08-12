@@ -7,7 +7,8 @@ P2 参数设置页（设计稿图 2）
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QDialog, QSizePolicy
+    QHeaderView, QFileDialog, QDialog, QSizePolicy,
+    QMessageBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -258,7 +259,19 @@ class ParamSettingPage(QWidget):
             be.setObjectName("iconBtn")
             be.setFixedSize(50, 28)
             be.clicked.connect(lambda _=False, rr=r: self._edit_roi(rr))
-            self.roi_table.setCellWidget(row, 3, be)
+            bd = QPushButton("删除")
+            bd.setObjectName("iconBtn")
+            bd.setFixedSize(50, 28)
+            bd.clicked.connect(lambda _=False, rr=r: self._delete_roi(rr))
+            op = QWidget()
+            op_layout = QHBoxLayout(op)
+            op_layout.setContentsMargins(4, 2, 4, 2)
+            op_layout.setSpacing(8)
+            op_layout.addStretch()
+            op_layout.addWidget(be)
+            op_layout.addWidget(bd)
+            op_layout.addStretch()
+            self.roi_table.setCellWidget(row, 3, op)
         self._render_preview()
 
     def _render_preview(self):
@@ -285,6 +298,17 @@ class ParamSettingPage(QWidget):
         dlg = RoiEditDialog(roi, self, image=self.preview.get_image())
         if dlg.exec_() == QDialog.Accepted:
             roi.update(dlg.values())
+            self._rebuild_table()
+            self.roi_changed.emit(self._rois)
+
+    def _delete_roi(self, roi):
+        idx = self._rois.index(roi)
+        name = roi.get("name", f"ROI {idx + 1}")
+        ret = QMessageBox.question(
+            self, "确认删除", f"确定要删除 <b>{name}</b> 吗?\n删除后不可恢复。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret == QMessageBox.Yes:
+            self._rois.remove(roi)
             self._rebuild_table()
             self.roi_changed.emit(self._rois)
 
