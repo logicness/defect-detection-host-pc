@@ -14,3 +14,7 @@ data/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 临时调试脚本 / 设计缓存
+.design/
+check_db.py
