@@ -154,8 +154,11 @@ class ImagePreview(QWidget):
         # 缺陷框：双层描边 + 角标 + 标签，确保在复杂背景下清晰可辨
         for d in self._dets:
             cls, conf, x1, y1, x2, y2 = d[:6]
-            rx, ry = ox + x1 * s, oy + y1 * s
-            rw, rh = (x2 - x1) * s, (y2 - y1) * s
+            # 统一转 int（QPainter.drawLine/drawRect/drawText 的标量重载需 int）
+            rx = int(ox + x1 * s)
+            ry = int(oy + y1 * s)
+            rw = int((x2 - x1) * s)
+            rh = int((y2 - y1) * s)
             rect = QRectF(rx, ry, rw, rh)
 
             # 外层高对比描边（黑色半透明）
@@ -166,7 +169,7 @@ class ImagePreview(QWidget):
             p.drawRect(rect)
 
             # 四角小标记，提高定位精度
-            corner = min(12.0, min(rw, rh) * 0.25)
+            corner = int(min(12.0, min(rw, rh) * 0.25))
             if corner > 3:
                 p.setPen(QPen(QColor("#ffffff"), 2))
                 # 左上
@@ -189,7 +192,7 @@ class ImagePreview(QWidget):
             tw = fm.horizontalAdvance(label) + 8
             th = fm.height() + 4
             lx, ly = rx, ry - th
-            if ly < target.top():
+            if ly < int(target.top()):
                 ly = ry  # 标签贴顶时放到框内
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(239, 68, 68, 220))

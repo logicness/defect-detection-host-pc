@@ -13,12 +13,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from core.tcp_client import TCPClient
 from core.database import DatabaseManager
 from core.plc_client import PLCClient
-
-# NEU-DET 类别名
-NEU_CLASSES = [
-    "crazing", "inclusion", "patches",
-    "pitted_surface", "rolled-in_scale", "scratches",
-]
+from core.class_names import NEU_CLASSES, resolve_class_names, class_name_of
 
 
 class _DBWriter(threading.Thread):
@@ -91,6 +86,8 @@ class AppController(QObject):
         self._frame_count = 0
         self._fps = 0.0
         self.last_image_path = ""
+        # 下位机（Nano）当前模型名，用于 class_id → 类别名 映射（main 在模型变化时同步）
+        self.nano_model_name = ""
 
         self._fps_timer = QTimer()
         self._fps_timer.timeout.connect(self._calc_fps)
@@ -155,11 +152,12 @@ class AppController(QObject):
     # ---------------- 结果管线 ----------------
     def _on_tcp_result(self, result: dict):
         """TCP 回传：raw 格式转 UI 格式后进入管线"""
+        class_names = resolve_class_names(self.nano_model_name)
         ui = []
         for det in result.get("detections", []):
             box = det.get("box", [0, 0, 0, 0])
             cid = det.get("class_id", 0)
-            cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+            cls = class_name_of(class_names, cid)
             ui.append((cls, det.get("confidence", 0), *box[:4]))
         self._process(ui, result.get("frame"), self.last_image_path)
 

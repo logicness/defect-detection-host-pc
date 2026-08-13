@@ -359,12 +359,13 @@ class LocalImageDetectDialog(QDialog):
     def _on_infer_result(self, result: dict):
         self.btn_detect.setEnabled(True)
         raw = result.get("detections", [])
-        from core.local_infer import NEU_CLASSES
+        from core.class_names import resolve_class_names, class_name_of
+        class_names = resolve_class_names(self._model)
         dets = []
         for d in raw:
             box = d.get("box", [0, 0, 0, 0])
             cid = d.get("class_id", 0)
-            cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+            cls = class_name_of(class_names, cid)
             dets.append((cls, d.get("confidence", 0), *box[:4]))
         self._last_ms = result.get("timing", {}).get("total_ms", 0)
         self._show_result(dets)
@@ -380,12 +381,18 @@ class LocalImageDetectDialog(QDialog):
             return
         self._nano_pending = False
         self.btn_detect.setEnabled(True)
-        from core.controller import NEU_CLASSES
+        from core.class_names import resolve_class_names, class_name_of
+        # 下位机类别映射：优先从父窗口 controller 取当前 Nano 模型名
+        nano_model = ""
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "controller"):
+            nano_model = getattr(parent.controller, "nano_model_name", "")
+        class_names = resolve_class_names(nano_model)
         dets = []
         for det in result.get("detections", []):
             box = det.get("box", [0, 0, 0, 0])
             cid = det.get("class_id", 0)
-            cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+            cls = class_name_of(class_names, cid)
             dets.append((cls, det.get("confidence", 0), *box[:4]))
         self._last_ms = result.get("inference_ms", 0) or result.get("timing", {}).get("total_ms", 0)
         self._show_result(dets)

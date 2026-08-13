@@ -19,11 +19,8 @@ import cv2
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
-# NEU-DET 类别名（与 core/controller.py 保持一致）
-NEU_CLASSES = [
-    "crazing", "inclusion", "patches",
-    "pitted_surface", "rolled-in_scale", "scratches",
-]
+# 类别名统一来源（NEU_CLASSES 保留用于向后兼容，新增数据集见 core/class_names.py）
+from core.class_names import NEU_CLASSES, resolve_class_names, class_name_of
 
 
 class LocalInferEngine(QObject):
@@ -42,6 +39,9 @@ class LocalInferEngine(QObject):
     @property
     def busy(self) -> bool:
         return self._busy
+
+    def cancel(self):
+        self._cancelled = True
 
     def detect(self, image_path: str, model_path: str, conf_thres=0.25, iou_thres=0.45):
         """异步执行本地推理（后台线程，不阻塞 UI）"""
@@ -188,7 +188,8 @@ def clear_session_cache():
         _session_cache.clear()
 
 
-def infer_frame(session, frame, conf_thres=0.25, iou_thres=0.45) -> list:
+def infer_frame(session, frame, conf_thres=0.25, iou_thres=0.45,
+                class_names: list = None) -> list:
     """对 BGR 帧执行 ONNX 推理 → UI 格式 [(cls, conf, x1, y1, x2, y2), ...]"""
     from core.local_postprocess import yolo_postprocess
 
@@ -207,9 +208,11 @@ def infer_frame(session, frame, conf_thres=0.25, iou_thres=0.45) -> list:
     outputs = session.run(None, {session.get_inputs()[0].name: blob})
     raw = yolo_postprocess(outputs[0], scale, pad_w, pad_h, conf_thres, iou_thres)
 
+    if class_names is None:
+        class_names = NEU_CLASSES  # 向后兼容：未指定时按 NEU 6 类
     ui = []
     for d in raw:
         cid = d["class_id"]
-        cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+        cls = class_name_of(class_names, cid)
         ui.append((cls, d["confidence"], *d["box"]))
     return ui

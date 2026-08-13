@@ -32,6 +32,7 @@ class StreamEngine(QObject):
         self._local_session = None  # local 模式：onnx session
         self._local_conf = 0.25
         self._local_iou = 0.45
+        self._local_class_names = None  # local 模式：类别名表（按模型解析）
         self._warned_none_mode = False  # 仅提示一次
         self._running = False
         self._thread = None
@@ -51,9 +52,11 @@ class StreamEngine(QObject):
         """local 模式：加载本地 ONNX 模型（失败发错误信号，回退 sim）"""
         try:
             from core.local_infer import load_session
+            from core.class_names import resolve_class_names
             self._local_session = load_session(model_path)
             self._local_conf = conf
             self._local_iou = iou
+            self._local_class_names = resolve_class_names(model_path)
             self.log_message.emit("INFO", f"本地模型已加载: {model_path}")
         except Exception as e:
             self._local_session = None
@@ -106,7 +109,8 @@ class StreamEngine(QObject):
                 elif self.infer_mode == "local" and self._local_session is not None:
                     from core.local_infer import infer_frame
                     dets = infer_frame(self._local_session, frame,
-                                       self._local_conf, self._local_iou)
+                                       self._local_conf, self._local_iou,
+                                       class_names=self._local_class_names)
                     self.result_received.emit({"detections": dets, "frame": frame})
                 elif self._infer_cb:
                     self._infer_cb(frame)  # tcp：结果异步经 controller 回传

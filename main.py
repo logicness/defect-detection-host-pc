@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
         # 核心对象
         self.cfg = cfg_mod.load_config()
         self.controller = AppController()
+        # 同步下位机当前模型名，用于 class_id → 类别名 映射
+        self.controller.nano_model_name = self.cfg.get(
+            "state", {}).get("last_nano_model", "")
         self.model_ctl = ModelManagerCtl(self.controller.tcp)
         # 默认 infer_mode 用 tcp，禁止未配置时误入模拟演示
         self.stream_engine = StreamEngine(infer_mode="tcp")
@@ -409,17 +412,26 @@ class MainWindow(QMainWindow):
         # 用户已点击停止，忽略延迟到达的推理结果
         if getattr(self, "_detection_paused", False):
             return
-        from core.local_infer import NEU_CLASSES
+        from core.class_names import resolve_class_names, class_name_of
+        class_names = resolve_class_names(self._local_model)
         raw = result.get("detections", [])
         dets = []
         for d in raw:
             box = d.get("box", [0, 0, 0, 0])
             cid = d.get("class_id", 0)
-            cls = NEU_CLASSES[cid] if cid < len(NEU_CLASSES) else f"cls{cid}"
+            cls = class_name_of(class_names, cid)
             dets.append((cls, d.get("confidence", 0), *box[:4]))
         ms = result.get("timing", {}).get("total_ms", 0) or 0
         path = self._local_image_path or ""
         basename = os.path.basename(path) or "本地图片"
+
+        # 再次检查：如果停止按钮已触发，则只记录不渲染
+        if getattr(self, "_detection_paused", False):
+            self.controller.log_message.emit(
+                "INFO", "检测", f"本地推理完成但已停止，忽略结果: {basename}")
+            self.status_left.setText(
+                f"本地图片: {basename}　| 已停止")
+            return
 
         self.controller.ingest_result(dets, self._local_image, path)
         self.controller.log_message.emit(
@@ -454,8 +466,27 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.page_realtime.set_running(False)
+
         # 清除预览图上的检测框与 NG 浮窗
+        # 多次清空 + 强制立即重绘 + 延迟安全网，防止任何竞态导致残留
+        try:
+            self.page_realtime.preview.clear_detections()
+            self.page_realtime.preview.repaint()
+        except Exception:
+            pass
         self.page_realtime.update_detections([])
+        try:
+            self.page_realtime.preview.clear_detections()
+            self.page_realtime.preview.repaint()
+        except Exception:
+            pass
+
+        # 清空右侧当前结果详情，让停止有明确视觉反馈（KPI 累计值保留）
+        self.page_realtime.update_detail(
+            "Product_A_v1", "--", "--", 0, "--",
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            self._local_image_path or "--")
+
         # 本地图片模式下重新显示原图，确保框被彻底清除
         if self._local_image_active and self._local_image is not None:
             rgb = cv2.cvtColor(self._local_image, cv2.COLOR_BGR2RGB)
@@ -464,7 +495,23 @@ class MainWindow(QMainWindow):
                 QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
             self.status_left.setText(
                 f"本地图片: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
+
+        # 延迟安全网：再清两次，捕获任何延迟到达的信号
+        QTimer.singleShot(50, self._safe_clear_detections)
+        QTimer.singleShot(150, self._safe_clear_detections)
+
         self.controller.log_message.emit("INFO", "检测", "检测已停止")
+
+    def _safe_clear_detections(self):
+        """停止检测后的安全清框：_detection_paused 期间任何延迟结果都会触发这里"""
+        if getattr(self, "_detection_paused", False):
+            try:
+                self.page_realtime.preview.clear_detections()
+                self.page_realtime.preview.repaint()
+                self.controller.log_message.emit(
+                    "DEBUG", "检测", "停止后安全清框已执行")
+            except Exception:
+                pass
 
     def _on_stream_frame(self, frame):
         self._last_frame = frame
@@ -476,6 +523,14 @@ class MainWindow(QMainWindow):
     def _on_detection_result(self, result: dict):
         # 用户已点击停止，忽略延迟到达的结果，避免框继续显示
         if getattr(self, "_detection_paused", False):
+            # 强制清空预览框，避免停止前最后一帧残留
+            try:
+                self.page_realtime.preview.clear_detections()
+                self.page_realtime.preview.repaint()
+                self.controller.log_message.emit(
+                    "DEBUG", "检测", "忽略停止后的延迟检测结果并清框")
+            except Exception:
+                pass
             return
         dets = result.get("detections", [])
         frame = result.get("frame")
@@ -685,8 +740,9 @@ class MainWindow(QMainWindow):
         self.page_realtime.set_cur_model(base)
         self.page_param.set_cur_model(base)
         self.controller.log_message.emit("INFO", "模型", f"下位机当前模型: {base}")
-        # 记忆 Nano 当前模型
+        # 记忆 Nano 当前模型 + 同步类别映射
         self._save_state(last_nano_model=active)
+        self.controller.nano_model_name = active
 
     def _on_model_load_result(self, payload):
         """下位机模型切换结果 → 同步标题栏/页面"""
@@ -700,8 +756,9 @@ class MainWindow(QMainWindow):
         self.page_realtime.set_cur_model(base)
         self.page_param.set_cur_model(base)
         self.controller.log_message.emit("INFO", "模型", f"模型切换成功: {base}")
-        # 记忆 Nano 当前模型
+        # 记忆 Nano 当前模型 + 同步类别映射
         self._save_state(last_nano_model=model)
+        self.controller.nano_model_name = model
 
     def _on_nano_connected(self):
         """检测到开发板通信 → 自动切换为开发板模型"""
