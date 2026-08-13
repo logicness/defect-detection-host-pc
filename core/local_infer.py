@@ -37,6 +37,7 @@ class LocalInferEngine(QObject):
         super().__init__(parent)
         self._lock = threading.Lock()
         self._busy = False
+        self._cancelled = False
 
     @property
     def busy(self) -> bool:
@@ -47,12 +48,17 @@ class LocalInferEngine(QObject):
         if self._busy:
             self.error_ready.emit("本地推理正在进行中，请稍候")
             return
+        self._cancelled = False
         self._busy = True
         self.status_changed.emit(True)
         threading.Thread(
             target=self._worker, daemon=True,
             args=(image_path, model_path, conf_thres, iou_thres),
         ).start()
+
+    def cancel(self):
+        """请求取消当前推理；实际线程不会中断，但结果不会被发出"""
+        self._cancelled = True
 
     # ---------- 后台线程 ----------
     def _worker(self, image_path, model_path, conf_thres, iou_thres):
@@ -71,20 +77,24 @@ class LocalInferEngine(QObject):
             else:  # .pt 及其他（默认 ultralytics）
                 dets, timing = self._infer_ultralytics(img, model_path, conf_thres, iou_thres)
 
-            result = {
-                "detections": dets,
-                "timing": timing,
-                "model": os.path.basename(model_path),
-                "source": "local",
-                "ok": True,
-            }
-            self.result_ready.emit(result)
+            # 若用户已点击停止，抑制结果渲染
+            if not self._cancelled:
+                result = {
+                    "detections": dets,
+                    "timing": timing,
+                    "model": os.path.basename(model_path),
+                    "source": "local",
+                    "ok": True,
+                }
+                self.result_ready.emit(result)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.error_ready.emit(f"本地推理失败: {e}")
+            if not self._cancelled:
+                import traceback
+                traceback.print_exc()
+                self.error_ready.emit(f"本地推理失败: {e}")
         finally:
             self._busy = False
+            self._cancelled = False
             self.status_changed.emit(False)
 
     # ---------- ultralytics (.pt) ----------

@@ -17,6 +17,8 @@ _DATASET_MAP = [
     ("mvit_", "MVIT"),
     ("guangdong_", "广东铝"),
     ("guangdong", "广东铝"),
+    ("广东铝", "广东铝"),
+    ("铝型材", "广东铝"),
     ("steeldefectx", "SteelDefectX"),
     ("steel_defect", "SteelDefectX"),
     ("crazing", "NEU-DET"),
@@ -111,3 +113,92 @@ def find_library_item(path: str) -> dict:
         if e.get("path", "") == path:
             return e
     return None
+
+
+# ---------------- 训练图片目录推断 ----------------
+_TRAIN_ROOT = r"D:\RK3568&Orin Nano\ORIN NANO\Model Training"
+
+# 数据集显示名 → 候选图片目录（按优先级排列，取第一个存在且含图片的）
+_DATASET_IMAGE_CANDIDATES = {
+    "NEU-DET": [
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\NEU_FIXED_6类_1800张_补标版\images\train",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\NEU_6类_1800张_钢材缺陷\images\train",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\NEU_FIXED_6类_1800张_补标版\images",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\NEU_6类_1800张_钢材缺陷\images",
+    ],
+    "SteelDefectX": [
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\SteelDefectX_YOLO_25类_7764张\train\images",
+        rf"{_TRAIN_ROOT}\datasets\Merged_SDX_NEU\train\images",
+        rf"{_TRAIN_ROOT}\datasets\Merged_SDX_NEU\val\images",
+    ],
+    "MVIT": [
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\MVIT_3子集_1810张_真实产线\ready\casting_billet\images",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\MVIT_3子集_1810张_真实产线\ready\mhpsds\images",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\MVIT_3子集_1810张_真实产线\ready\steel_pipe\images",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\MVIT_3子集_1810张_真实产线\ready",
+    ],
+    "广东铝": [
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\天池铝型材_11类_2618张_分类格式\铝型材表面瑕疵数据集",
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\天池铝型材_11类_2618张_分类格式",
+    ],
+    "MT": [
+        rf"{_TRAIN_ROOT}\_archive_20260811\datasets\MT_cls_6类_1344张_磁瓦分类",
+    ],
+}
+
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+
+
+def _dir_has_images(d: str) -> bool:
+    """判断目录本身或向下 2 层子目录中是否含有图片文件"""
+    if not os.path.isdir(d):
+        return False
+    try:
+        dirs = [d]
+        for _ in range(2):
+            nxt = []
+            for cur in dirs:
+                for entry in os.listdir(cur):
+                    p = os.path.join(cur, entry)
+                    if os.path.isfile(p) and p.lower().endswith(_IMAGE_EXTS):
+                        return True
+                    if os.path.isdir(p):
+                        nxt.append(p)
+            dirs = nxt
+            if not dirs:
+                break
+    except OSError:
+        return False
+    return False
+
+
+def resolve_dataset_image_dir(model_path: str) -> str:
+    """根据模型文件路径推断其训练数据集对应的图片目录，找不到返回 ''。
+
+    优先按数据集名匹配已知目录：第一个含图片的目录直接返回；
+    若候选目录存在但无图片（如仅含压缩包），返回第一个存在的候选目录；
+    最后在模型所在目录附近寻找 images/。
+    """
+    if not model_path:
+        return ""
+    dataset = extract_dataset(model_path)
+    existing_fallback = ""
+    for cand in _DATASET_IMAGE_CANDIDATES.get(dataset, []):
+        if os.path.isdir(cand):
+            if _dir_has_images(cand):
+                return cand
+            if not existing_fallback:
+                existing_fallback = cand
+    if existing_fallback:
+        return existing_fallback
+    # 通用兜底：模型文件所在目录附近找图片
+    base = os.path.dirname(model_path)
+    for cand in (
+        os.path.join(base, "images", "train"),
+        os.path.join(base, "images"),
+        os.path.join(base, "train", "images"),
+        base,
+    ):
+        if _dir_has_images(cand):
+            return cand
+    return ""

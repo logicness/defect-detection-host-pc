@@ -269,8 +269,15 @@ class LocalImageDetectDialog(QDialog):
 
     # ---------------- 选图 ----------------
     def _on_pick(self):
+        # 优先跟随当前模型的训练数据集图片目录
+        start_dir = self._default_image_dir
+        if self._model and os.path.isfile(self._model):
+            from components.model_info import resolve_dataset_image_dir
+            resolved = resolve_dataset_image_dir(self._model)
+            if resolved:
+                start_dir = resolved
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择检测图片", self._default_image_dir,
+            self, "选择检测图片", start_dir,
             "图片文件 (*.png *.jpg *.jpeg *.bmp)")
         if path:
             self._load_image(path)

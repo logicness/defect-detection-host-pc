@@ -94,7 +94,8 @@ class ModelManagerDialog(QDialog):
         self._models = []          # 下位机原始模型数据
         self._active_nano = ""     # 当前激活的下位机模型
         self._selected_path = ""   # 当前选中的路径或 nano 全名
-        self._selected_source = "" # "nano" | "local"
+        self._selected_source = "" # "nano" | "local" | "scan"
+        self._scan_results = []    # 自动识别/扫描到的临时模型路径
         self._build_ui()
         self._connect_signals()
         self._update_source_status()
@@ -300,6 +301,36 @@ class ModelManagerDialog(QDialog):
 
         lay.addStretch()
 
+        # 本次扫描结果(右下角)
+        scan_box = QFrame()
+        scan_box.setStyleSheet(
+            "QFrame { border:1px solid #1f2937; border-radius:6px; background:#0b1120; }")
+        scan_lay = QVBoxLayout(scan_box)
+        scan_lay.setContentsMargins(10, 10, 10, 10)
+        scan_lay.setSpacing(8)
+
+        scan_title = QLabel("本次扫描结果")
+        scan_title.setStyleSheet(
+            "border-left:4px solid #eab308; padding-left:8px;"
+            "font-size:16px; font-weight:600; color:#f1f5f9; background:transparent;")
+        scan_lay.addWidget(scan_title)
+
+        self.lbl_scan_hint = QLabel("点击「自动识别」或「扫描目录」后,未入库模型将显示在这里")
+        self.lbl_scan_hint.setStyleSheet("font-size:13px; color:#64748b; background:transparent;")
+        self.lbl_scan_hint.setWordWrap(True)
+        scan_lay.addWidget(self.lbl_scan_hint)
+
+        self.scan_list = QListWidget()
+        self.scan_list.setFixedHeight(180)
+        self.scan_list.setStyleSheet(
+            "QListWidget { font-size:14px; background:#0f172a; border:none; border-radius:5px; padding:4px; }"
+            "QListWidget::item { padding:5px 4px; border-bottom:1px solid #1f2937; }"
+            "QListWidget::item:selected { background:#1e293b; color:#f1f5f9; }"
+            "QListWidget::item:hover { background:#1e293b; }")
+        self.scan_list.itemClicked.connect(self._on_scan_item_clicked)
+        scan_lay.addWidget(self.scan_list)
+        lay.addWidget(scan_box)
+
         # 操作按钮区
         self.action_box = QWidget()
         action_layout = QVBoxLayout(self.action_box)
@@ -382,6 +413,7 @@ class ModelManagerDialog(QDialog):
         self._restore_local_model()
         self.refresh_nano_list()
         self._refresh_tree()
+        self._refresh_scan_panel()
 
     # ---------- 树形模型列表 ----------
     def _refresh_tree(self):
@@ -427,7 +459,48 @@ class ModelManagerDialog(QDialog):
 
         # 更新提示
         total = len(local_items) + len(self._models)
-        self.lbl_list_hint.setText(f"共 {total} 个模型：本地 {len(local_items)}，下位机 {len(self._models)}。选中后在右侧操作。")
+        self.lbl_list_hint.setText(
+            f"共 {total} 个模型：本地 {len(local_items)}，下位机 {len(self._models)}。"
+            "选中后在右侧操作。")
+
+    def _refresh_scan_panel(self):
+        """刷新右下角扫描结果列表"""
+        self.scan_list.clear()
+        default_norm = os.path.normpath(self._default_model or "")
+        visible = [
+            path for path in self._scan_results
+            if os.path.isfile(path) and not self._path_in_library(path)
+            and os.path.normpath(path) != default_norm
+        ]
+        if visible:
+            self.lbl_scan_hint.setText(f"未入库 {len(visible)} 个,选中后在上方详情区操作")
+            for path in visible:
+                tags = model_tags(path)
+                name = os.path.basename(path)
+                dataset = tags["dataset"] or "未知"
+                classes = f"{tags['classes']}类" if tags['classes'] else "未知"
+                label = tags["quality_label"]
+                score = tags["score"]
+                prefix = "★ " if tags["is_recommended"] else ""
+                text = f"{prefix}{name} · {dataset}/{classes} · {label}{f'({score})' if score else ''}"
+                item = QListWidgetItem(text)
+                item.setData(Qt.UserRole, path)
+                item.setToolTip(path)
+                item.setForeground(_qcolor(tags["color"]))
+                self.scan_list.addItem(item)
+        else:
+            self.lbl_scan_hint.setText("点击「自动识别」或「扫描目录」后,未入库模型将显示在这里")
+
+    def _on_scan_item_clicked(self, item: QListWidgetItem):
+        """点击右下角扫描结果:选中并渲染详情"""
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        self.tree.clearSelection()
+        self._selected_path = path
+        self._selected_source = "scan"
+        self._render_detail(path, "scan")
+        self.btn_load.setEnabled(True)
 
     def _add_tree_item(self, parent: QTreeWidgetItem, item: dict):
         """向树中添加一个模型条目"""
@@ -451,6 +524,22 @@ class ModelManagerDialog(QDialog):
             tree_item.setData(0, Qt.UserRole, path)
             tree_item.setData(0, Qt.UserRole + 1, "local")
             tree_item.setData(0, Qt.UserRole + 2, in_lib)
+        elif item.get("source") == "scan":
+            path = item["path"]
+            tags = model_tags(path)
+            name = os.path.basename(path)
+            dataset = tags["dataset"] or "未知"
+            classes = f"{tags['classes']}类" if tags['classes'] else "未知"
+            label = tags["quality_label"]
+            score = tags["score"]
+            color = tags["color"]
+            prefix = "★ " if tags["is_recommended"] else ""
+            text = f"{prefix}[未入库] {name} · {dataset}/{classes} · {label}{f'({score})' if score else ''}"
+            tree_item = QTreeWidgetItem(parent, [text])
+            tree_item.setForeground(0, _qcolor(color))
+            tree_item.setToolTip(0, path)
+            tree_item.setData(0, Qt.UserRole, path)
+            tree_item.setData(0, Qt.UserRole + 1, "scan")
         else:
             m = item.get("data", {})
             name_full = m.get("name", "") if isinstance(m, dict) else str(m)
@@ -509,10 +598,12 @@ class ModelManagerDialog(QDialog):
             return
         key = item.data(0, Qt.UserRole) or ""
         source = item.data(0, Qt.UserRole + 1) or ""
-        if source not in ("local", "nano"):
+        if source not in ("local", "nano", "scan"):
             # 点击的是分组节点,不处理
             self._clear_detail()
             return
+        # 切换为左侧模型时,清空右下角扫描列表的选中态,避免视觉混淆
+        self.scan_list.clearSelection()
         self._selected_path = key
         self._selected_source = source
         self._render_detail(key, source)
@@ -539,7 +630,7 @@ class ModelManagerDialog(QDialog):
         self.btn_del.setEnabled(False)
 
     def _render_detail(self, key: str, source: str):
-        if source == "local":
+        if source in ("local", "scan"):
             path = key
             lib_item = find_library_item(path)
             tags = model_tags(path)
@@ -611,7 +702,7 @@ class ModelManagerDialog(QDialog):
 
     def _on_load_current(self):
         """右侧加载按钮：根据当前选中来源执行本地加载或 Nano 切换"""
-        if self._selected_source == "local":
+        if self._selected_source in ("local", "scan"):
             path = self._selected_path
             if not path or not os.path.isfile(path):
                 QMessageBox.warning(self, "加载模型", "选中的本地模型文件不存在")
@@ -620,6 +711,7 @@ class ModelManagerDialog(QDialog):
             self.lbl_status.setText(f"已加载本地模型：{os.path.basename(path)}")
             self.lbl_status.setStyleSheet("color:#22c55e; font-size:17px; background:transparent;")
             self._default_model = path
+            # 若来自扫描结果,加载后保留在扫描结果中(用户可再添加到库)
             self._refresh_tree()
         elif self._selected_source == "nano":
             name = self._selected_path
@@ -739,15 +831,21 @@ class ModelManagerDialog(QDialog):
             return
 
         models = _auto_scan(max_depth=5)
-        # 将扫描结果临时加入模型库? 不,仅加入列表供用户选择/添加
-        added = 0
+        # 记忆扫描结果(去重,排除已入库),并在右下角扫描结果列表中展示
+        seen = set()
+        self._scan_results = []
         for m in models:
-            path = m["path"]
-            if find_library_item(path) is None:
-                # 临时记忆扫描结果,刷新树时会显示为"本地"未入库
-                added += 1
+            path = m.get("path", "")
+            if not path or not os.path.isfile(path):
+                continue
+            norm = os.path.normpath(path)
+            if norm in seen or self._path_in_library(path) or norm == os.path.normpath(self._default_model or ""):
+                continue
+            seen.add(norm)
+            self._scan_results.append(path)
         self._refresh_tree()
-        self.lbl_status.setText(f"自动识别到 {len(models)} 个模型")
+        self._refresh_scan_panel()
+        self.lbl_status.setText(f"自动识别到 {len(models)} 个模型，未入库 {len(self._scan_results)} 个")
         if models:
             _info_popup(self, "自动识别完成",
                         f"在常见目录中自动识别到 {len(models)} 个模型。\n\n"
@@ -770,8 +868,20 @@ class ModelManagerDialog(QDialog):
             return 0
 
         models = _scan_models([root], max_depth=5)
+        seen = set()
+        self._scan_results = []
+        for m in models:
+            path = m.get("path", "")
+            if not path or not os.path.isfile(path):
+                continue
+            norm = os.path.normpath(path)
+            if norm in seen or self._path_in_library(path) or norm == os.path.normpath(self._default_model or ""):
+                continue
+            seen.add(norm)
+            self._scan_results.append(path)
         self._refresh_tree()
-        self.lbl_status.setText(f"扫描到 {len(models)} 个模型")
+        self._refresh_scan_panel()
+        self.lbl_status.setText(f"扫描到 {len(models)} 个模型，未入库 {len(self._scan_results)} 个")
         if models:
             _info_popup(self, "扫描完成",
                         f"目录扫描完成，找到 {len(models)} 个模型。\n\n"
@@ -786,6 +896,14 @@ class ModelManagerDialog(QDialog):
         """打开对话框时恢复上次选中的本地模型路径"""
         if self._default_model and os.path.isfile(self._default_model):
             self._default_model_dir = os.path.dirname(self._default_model)
+
+    def _path_in_library(self, path: str) -> bool:
+        """判断路径是否已存在于模型库(按规范化路径比较,兼容 / 与 \\)"""
+        norm = os.path.normpath(path)
+        for e in load_library():
+            if os.path.normpath(e.get("path", "")) == norm:
+                return True
+        return False
 
     # ---------- 模型库：添加 / 删除 ----------
     def _on_add_to_library(self):
@@ -819,7 +937,11 @@ class ModelManagerDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "模型管理", f"写入模型库失败: {e}")
             return
+        # 从扫描结果中移除,避免重复显示
+        if path in self._scan_results:
+            self._scan_results.remove(path)
         self._refresh_tree()
+        self._refresh_scan_panel()
         self._select_tree_item(path)
         self.lbl_status.setText(f"已添加到模型库: {os.path.basename(path)}")
         self.lbl_status.setStyleSheet("color:#22c55e; font-size:17px; background:transparent;")
@@ -873,7 +995,7 @@ class ModelManagerDialog(QDialog):
                     f"模型信息已更新：\n{name.strip() or os.path.basename(path)}")
 
     def _on_delete_local(self):
-        """删除选中的本地模型：从模型库移除；文件删除需用户二次确认（默认保留文件）"""
+        """删除选中的本地模型：从模型库移除；扫描结果未入库则仅从列表移除；文件删除需二次确认（默认保留文件）"""
         path = self._selected_path
         if not path:
             QMessageBox.information(self, "模型管理", "请先选中要删除的模型")
@@ -881,6 +1003,16 @@ class ModelManagerDialog(QDialog):
         name = os.path.basename(path)
         lib_item = find_library_item(path)
         in_lib = lib_item is not None
+
+        # 扫描结果且未入库：直接从扫描结果中移除,不删文件
+        if self._selected_source == "scan" and not in_lib:
+            if path in self._scan_results:
+                self._scan_results.remove(path)
+            self._clear_detail()
+            self._refresh_tree()
+            self.lbl_status.setText(f"已从扫描结果移除: {name}")
+            self.lbl_status.setStyleSheet("color:#94a3b8; font-size:17px; background:transparent;")
+            return
 
         # 1) 从模型库移除条目（若存在）
         items = load_library()
@@ -918,6 +1050,7 @@ class ModelManagerDialog(QDialog):
 
         self._clear_detail()
         self._refresh_tree()
+        self._refresh_scan_panel()
         self.lbl_status.setText(f"已移除: {name}")
         self.lbl_status.setStyleSheet("color:#94a3b8; font-size:17px; background:transparent;")
         QMessageBox.information(self, "删除模型", info)

@@ -151,11 +151,52 @@ class ImagePreview(QWidget):
                            self._handle_size, self._handle_size,
                            QColor("#4ade80"))
 
-        # 缺陷红框
-        p.setPen(QPen(QColor("#ef4444"), 2))
+        # 缺陷框：双层描边 + 角标 + 标签，确保在复杂背景下清晰可辨
         for d in self._dets:
-            _, _, x1, y1, x2, y2 = d[:6]
-            p.drawRect(QRectF(ox + x1 * s, oy + y1 * s, (x2 - x1) * s, (y2 - y1) * s))
+            cls, conf, x1, y1, x2, y2 = d[:6]
+            rx, ry = ox + x1 * s, oy + y1 * s
+            rw, rh = (x2 - x1) * s, (y2 - y1) * s
+            rect = QRectF(rx, ry, rw, rh)
+
+            # 外层高对比描边（黑色半透明）
+            p.setPen(QPen(QColor(0, 0, 0, 180), 4))
+            p.drawRect(rect)
+            # 内层高亮描边（亮红）
+            p.setPen(QPen(QColor("#ff5252"), 2))
+            p.drawRect(rect)
+
+            # 四角小标记，提高定位精度
+            corner = min(12.0, min(rw, rh) * 0.25)
+            if corner > 3:
+                p.setPen(QPen(QColor("#ffffff"), 2))
+                # 左上
+                p.drawLine(rx, ry + corner, rx, ry)
+                p.drawLine(rx, ry, rx + corner, ry)
+                # 右上
+                p.drawLine(rx + rw - corner, ry, rx + rw, ry)
+                p.drawLine(rx + rw, ry, rx + rw, ry + corner)
+                # 左下
+                p.drawLine(rx, ry + rh - corner, rx, ry + rh)
+                p.drawLine(rx, ry + rh, rx + corner, ry + rh)
+                # 右下
+                p.drawLine(rx + rw - corner, ry + rh, rx + rw, ry + rh)
+                p.drawLine(rx + rw, ry + rh - corner, rx + rw, ry + rh)
+
+            # 左上角标签背景
+            label = f"{cls} {conf:.2f}"
+            p.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(label) + 8
+            th = fm.height() + 4
+            lx, ly = rx, ry - th
+            if ly < target.top():
+                ly = ry  # 标签贴顶时放到框内
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(239, 68, 68, 220))
+            p.drawRect(lx, ly, tw, th)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(lx + 4, ly + fm.ascent() + 2, label)
+
         p.restore()
 
         # NG 浮窗（右上）

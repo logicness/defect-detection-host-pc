@@ -278,6 +278,9 @@ class MainWindow(QMainWindow):
 
     # ================= 检测流 =================
     def _on_start(self):
+        # 新一次检测开始时，允许接收推理结果
+        self._detection_paused = False
+
         # 如果实时流已经在跑，这次点击视为「停止」请求，避免重复启动多条流
         if self.stream_engine.is_running:
             self._on_stop()
@@ -403,6 +406,9 @@ class MainWindow(QMainWindow):
 
     def _on_local_infer_result(self, result: dict):
         """本地推理完成（后台线程回传）→ 转 UI 格式 → 统一入管线（KPI/写库/历史/预览画框）"""
+        # 用户已点击停止，忽略延迟到达的推理结果
+        if getattr(self, "_detection_paused", False):
+            return
         from core.local_infer import NEU_CLASSES
         raw = result.get("detections", [])
         dets = []
@@ -436,13 +442,29 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self):
         """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
+        # 标记停止：后续延迟到达的推理结果不再渲染，避免停止后框又出现
+        self._detection_paused = True
         if self.stream_engine.is_running:
             self.stream_engine.stop()
+        # 中止正在进行的本地后台推理
+        eng = getattr(self, "_local_infer_engine", None)
+        if eng is not None and getattr(eng, "busy", False):
+            try:
+                eng.cancel()
+            except Exception:
+                pass
         self.page_realtime.set_running(False)
-        self.controller.log_message.emit("INFO", "检测", "检测已停止")
+        # 清除预览图上的检测框与 NG 浮窗
+        self.page_realtime.update_detections([])
+        # 本地图片模式下重新显示原图，确保框被彻底清除
         if self._local_image_active and self._local_image is not None:
+            rgb = cv2.cvtColor(self._local_image, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            self.page_realtime.update_image(
+                QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
             self.status_left.setText(
                 f"本地图片: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
+        self.controller.log_message.emit("INFO", "检测", "检测已停止")
 
     def _on_stream_frame(self, frame):
         self._last_frame = frame
@@ -452,6 +474,9 @@ class MainWindow(QMainWindow):
         self.page_log.set_fps(fps)
 
     def _on_detection_result(self, result: dict):
+        # 用户已点击停止，忽略延迟到达的结果，避免框继续显示
+        if getattr(self, "_detection_paused", False):
+            return
         dets = result.get("detections", [])
         frame = result.get("frame")
         if frame is None:
@@ -689,6 +714,16 @@ class MainWindow(QMainWindow):
         self.controller.log_message.emit(
             "INFO", "模型", f"检测到开发板通信，已切换为开发板模型: {base}")
         self.status_left.setText(f"开发板已连接　|　模型: {base}")
+        # 连接成功弹窗（10 秒内不重复，避免自动重连风暴频繁弹窗）
+        now = time.time()
+        if now - getattr(self, "_last_conn_popup_ts", 0) >= 10:
+            self._last_conn_popup_ts = now
+            if QApplication.platformName() != "offscreen":
+                tcp = self.controller.tcp
+                QMessageBox.information(
+                    self, "连接成功",
+                    f"已成功连接下位机（{getattr(tcp, 'host', '')}:{getattr(tcp, 'port', '')}），"
+                    f"当前模型：{base}")
 
     def _on_nano_disconnected(self):
         """开发板断开 → 自动切回本地模型"""
@@ -801,10 +836,7 @@ class MainWindow(QMainWindow):
             timeout=t.get("timeout", 10))
         self.controller.connect_tcp()
         self.controller.log_message.emit(
-            "INFO", "通信", f"正在重新连接下位机 {host}:{port}...")
-        _popup_info(self, "重新连接",
-                    f"正在尝试连接下位机 {host}:{port}...\n"
-                    "连接结果请关注右下角运行日志。")
+            "INFO", "通信", f"正在重新连接下位机 {host}:{port}，结果请关注右下角运行日志")
 
     def _on_model_mgr_reconnect(self):
         """模型管理对话框里的重新连接按钮"""
@@ -884,8 +916,15 @@ class MainWindow(QMainWindow):
         点「开始检测」时对这张图做单帧推理。
         若取消选择且当前处于本地图片模式，则切回实时流模式。"""
         last_dir = self.cfg.get("state", {}).get("last_image_dir", "")
+        # 优先跟随当前模型的训练数据集图片目录
+        start_dir = ""
+        if self._local_model:
+            from components.model_info import resolve_dataset_image_dir
+            start_dir = resolve_dataset_image_dir(self._local_model)
+        if not start_dir:
+            start_dir = last_dir
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择检测图片", last_dir,
+            self, "选择检测图片", start_dir,
             "图片文件 (*.png *.jpg *.jpeg *.bmp)")
         if not path:
             # 取消选择：如果当前是本地图片模式，则清除并切回实时流模式
