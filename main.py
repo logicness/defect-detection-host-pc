@@ -292,6 +292,8 @@ class MainWindow(QMainWindow):
         # 已加载本地图片 → 单帧推理（用户选图后的预期行为）
         if self._local_image is not None:
             self._local_image_active = True
+            # 关键：推理期间必须启用「停止检测」按钮，否则用户无法停止/清框
+            self.page_realtime.set_running(True)
             self._detect_local_image()
             return
 
@@ -444,6 +446,7 @@ class MainWindow(QMainWindow):
     def _on_local_infer_error(self, msg: str):
         """本地推理失败（后台线程回传）"""
         self.controller.log_message.emit("ERROR", "检测", f"本地推理失败: {msg}")
+        self.page_realtime.set_running(False)
         self.status_left.setText(
             f"本地图片: {os.path.basename(self._local_image_path) or '--'}　| 推理失败")
         if QApplication.platformName() != "offscreen":
@@ -454,11 +457,12 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self):
         """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
+        from components.image_preview import _dbg_log
+        _dbg_log(f"_on_stop called paused={getattr(self, '_detection_paused', None)}")
         # 标记停止：后续延迟到达的推理结果不再渲染，避免停止后框又出现
         self._detection_paused = True
         if self.stream_engine.is_running:
             self.stream_engine.stop()
-        # 中止正在进行的本地后台推理
         eng = getattr(self, "_local_infer_engine", None)
         if eng is not None and getattr(eng, "busy", False):
             try:
@@ -525,6 +529,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_detection_paused", False):
             # 强制清空预览框，避免停止前最后一帧残留
             try:
+                from components.image_preview import _dbg_log
+                _dbg_log("_on_detection_result blocked (paused)")
                 self.page_realtime.preview.clear_detections()
                 self.page_realtime.preview.repaint()
                 self.controller.log_message.emit(
@@ -532,6 +538,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
+
         dets = result.get("detections", [])
         frame = result.get("frame")
         if frame is None:
