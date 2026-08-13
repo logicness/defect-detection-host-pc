@@ -457,8 +457,6 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self):
         """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
-        from components.image_preview import _dbg_log
-        _dbg_log(f"_on_stop called paused={getattr(self, '_detection_paused', None)}")
         # 标记停止：后续延迟到达的推理结果不再渲染，避免停止后框又出现
         self._detection_paused = True
         if self.stream_engine.is_running:
@@ -512,8 +510,6 @@ class MainWindow(QMainWindow):
             try:
                 self.page_realtime.preview.clear_detections()
                 self.page_realtime.preview.repaint()
-                self.controller.log_message.emit(
-                    "DEBUG", "检测", "停止后安全清框已执行")
             except Exception:
                 pass
 
@@ -529,8 +525,6 @@ class MainWindow(QMainWindow):
         if getattr(self, "_detection_paused", False):
             # 强制清空预览框，避免停止前最后一帧残留
             try:
-                from components.image_preview import _dbg_log
-                _dbg_log("_on_detection_result blocked (paused)")
                 self.page_realtime.preview.clear_detections()
                 self.page_realtime.preview.repaint()
                 self.controller.log_message.emit(
