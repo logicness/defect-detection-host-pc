@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""模型管理对话框 v3 功能测试（offscreen，模型库重定向到临时文件）
+"""模型管理对话框 v4（单页三区）功能测试（offscreen，模型库重定向到临时文件）
 覆盖：
 - 质量评分高/中/低/未知
-- 选择模型 Tab 列出本地库 + 下位机模型
-- 模型管理 Tab：添加进库 / 去重 / 库内标记 / 删除（仅移除不删文件）/ 恢复 / 加载信号
+- 树形列表：本地库 + 下位机分组、选中即详情
+- 添加到模型库（去重）/ 从库移除（不删文件）/ 删除信号
+- 加载本地模型信号 / 重新打开恢复模型库
 用法: set QT_QPA_PLATFORM=offscreen && python tools/test_model_mgr.py
 """
 import os
@@ -37,6 +38,23 @@ def pump(app, sec=0.05):
     while time.time() - t0 < sec:
         app.processEvents()
         time.sleep(0.01)
+
+
+def tree_item_paths(tree):
+    """遍历树,返回 [(text, path, source, in_lib), ...]"""
+    out = []
+    it = tree.invisibleRootItem()
+    for i in range(it.childCount()):
+        group = it.child(i)
+        for j in range(group.childCount()):
+            c = group.child(j)
+            out.append((
+                c.text(0),
+                c.data(0, Qt.UserRole) or "",
+                c.data(0, Qt.UserRole + 1) or "",
+                bool(c.data(0, Qt.UserRole + 2)),
+            ))
+    return out
 
 
 def main():
@@ -127,29 +145,39 @@ def main():
     dlg.show()
     pump(app)
 
-    check("对话框构建（含 Tab）", dlg.tabs is not None)
-    check("选择模型 Tab 存在", dlg.tbl_select is not None)
-    check("模型管理 Tab 存在", dlg.table_nano is not None and dlg.list_local is not None)
-    check("管理按钮存在", dlg.btn_add_lib is not None and dlg.btn_del is not None)
+    check("对话框构建（单页三区）", dlg.tree is not None)
+    check("加载/添加/删除按钮存在",
+          dlg.btn_load is not None and dlg.btn_add_lib is not None
+          and dlg.btn_del is not None)
+    # 树形列表有「本地库」「下位机」两个分组
+    it = dlg.tree.invisibleRootItem()
+    groups = [it.child(i).text(0) for i in range(it.childCount())]
+    check("树形列表含本地库/下位机分组",
+          "本地库" in groups and "下位机" in groups)
 
-    # ---- 选择模型 Tab 默认列出本地模型 ----
-    dlg.tabs.setCurrentIndex(0)
+    # ---- 从扫描结果添加进模型库（v1.4 流程：扫描 → 选中 → 添加到库）----
+    dlg._scan_results = [MODEL]
+    dlg._refresh_scan_panel()
     pump(app)
-    # 当前无库模型，列表应为空或仅含默认模型（默认模型未设）
-    check("选择模型 Tab 为空库时无异常", dlg.tbl_select.rowCount() >= 0)
-
-    # ---- 添加进模型库 ----
-    dlg.tabs.setCurrentIndex(1)
+    check("扫描结果列表含 MODEL",
+          any(dlg.scan_list.item(i).data(Qt.UserRole) == MODEL
+              for i in range(dlg.scan_list.count())))
+    # 模拟点击扫描项（选中 source=scan）
+    for i in range(dlg.scan_list.count()):
+        if dlg.scan_list.item(i).data(Qt.UserRole) == MODEL:
+            dlg._on_scan_item_clicked(dlg.scan_list.item(i))
+            break
     pump(app)
-    dlg.edit_local.setText(MODEL)
+    check("选中扫描项后路径正确", dlg._selected_path == MODEL
+          and dlg._selected_source == "scan")
     dlg._on_add_to_library()
     pump(app)
     lib = mlib.load_library()
     check("添加后模型库含该模型", any(e.get("path") == MODEL for e in lib))
-    check("列表项标记为 [已入库]", any(
-        "[已入库]" in dlg.list_local.item(i).text()
-        for i in range(dlg.list_local.count())
-        if dlg.list_local.item(i).data(Qt.UserRole) == MODEL))
+    items = tree_item_paths(dlg.tree)
+    matched = [t for t in items if t[1] == MODEL]
+    check("列表项标记为 [已入库]",
+          matched and any(t[3] for t in matched))
 
     # ---- 去重：重复添加不新增 ----
     before = len(mlib.load_library())
@@ -159,10 +187,6 @@ def main():
 
     # ---- 删除（仅从库移除，不删文件）----
     before_file = os.path.isfile(MODEL)
-    for i in range(dlg.list_local.count()):
-        if dlg.list_local.item(i).data(Qt.UserRole) == MODEL:
-            dlg.list_local.setCurrentRow(i)
-            break
     deleted = []
     dlg.local_model_deleted.connect(deleted.append)
     dlg._on_delete_local()
@@ -172,42 +196,20 @@ def main():
     check("删除未删磁盘文件", os.path.isfile(MODEL) == before_file)
     check("删除信号已发出", deleted == [MODEL])
 
-    # ---- 选择模型 Tab 刷新后不含已删模型 ----
-    dlg.tabs.setCurrentIndex(0)
-    pump(app)
-    paths = [dlg.tbl_select.item(i, 0).data(Qt.UserRole)
-             for i in range(dlg.tbl_select.rowCount())
-             if dlg.tbl_select.item(i, 0).data(Qt.UserRole + 1) == "local"]
-    check("选择模型 Tab 已移除被删模型", MODEL not in paths)
-
     # ---- 恢复：重新打开对话框列出模型库 ----
-    # 先把 TEST_MODEL 加入库
     mlib.save_library([{"path": TEST_MODEL, "name": os.path.basename(TEST_MODEL),
                         "size_mb": round(os.path.getsize(TEST_MODEL) / 1e6, 2)}])
     dlg2 = ModelManagerDialog(tcp, open_tab="manage")
     pump(app)
-    paths = [dlg2.list_local.item(i).data(Qt.UserRole)
-             for i in range(dlg2.list_local.count())]
-    check("重新打开列出模型库条目", TEST_MODEL in paths)
+    items2 = tree_item_paths(dlg2.tree)
+    check("重新打开列出模型库条目", any(t[1] == TEST_MODEL for t in items2))
 
     # ---- 加载信号：选中模型点「加载为本地推理模型」----
-    for i in range(dlg2.list_local.count()):
-        if dlg2.list_local.item(i).data(Qt.UserRole) == TEST_MODEL:
-            dlg2.list_local.setCurrentRow(i)
-            break
-    dlg2.edit_local.setText(TEST_MODEL)
+    dlg2._select_tree_item(TEST_MODEL)
+    pump(app)
     got = []
     dlg2.local_model_selected.connect(got.append)
-    dlg2.tabs.setCurrentIndex(0)
-    dlg2._refresh_select_table()
-    pump(app)
-    # 在选择 Tab 中选中 TEST_MODEL 并加载
-    for r in range(dlg2.tbl_select.rowCount()):
-        if dlg2.tbl_select.item(r, 0).data(Qt.UserRole) == TEST_MODEL:
-            dlg2.tbl_select.setCurrentCell(r, 0)
-            break
-    pump(app)
-    dlg2._on_select_load()
+    dlg2._on_load_current()
     pump(app)
     check("加载信号发出正确路径", got == [TEST_MODEL])
 
