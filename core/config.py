@@ -10,7 +10,7 @@ CONFIG_PATH = os.path.join(DATA_DIR, "host_config.json")
 
 DEFAULT_CONFIG = {
     "tcp": {"host": "192.168.1.101", "port": 8888, "heartbeat": 5,
-            "retries": 3, "timeout": 10},
+            "retries": 1, "timeout": 10},
     "plc": {"protocol": "Modbus TCP", "host": "192.168.1.200", "port": 2000,
             "unit_id": 1, "timeout_ms": 3000, "poll_ms": 500},
     "camera": {"name": "相机 01", "exposure": 10.0, "gain": 2.0, "brightness": 128,

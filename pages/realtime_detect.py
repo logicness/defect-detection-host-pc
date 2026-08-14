@@ -40,6 +40,7 @@ class RealtimeDetectPage(QWidget):
     save_path_changed = pyqtSignal(str)
     reconnect_requested = pyqtSignal()
     roi_changed = pyqtSignal(list)
+    conf_changed = pyqtSignal(float)   # 实时置信度数值变化
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,6 +108,7 @@ class RealtimeDetectPage(QWidget):
         self.spin_conf.setRange(0.05, 1.0)
         self.spin_conf.setSingleStep(0.05)
         self.spin_conf.setValue(0.85)
+        self.spin_conf.valueChanged.connect(self.conf_changed.emit)
         self.spin_area = SpinBox()
         self.spin_area.setRange(0, 100000)
         self.spin_area.setValue(50)

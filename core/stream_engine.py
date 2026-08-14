@@ -66,6 +66,11 @@ class StreamEngine(QObject):
     def clear_local_model(self):
         self._local_session = None
 
+    def set_local_conf(self, conf: float):
+        """local 模式实时更新置信度阈值（下一帧生效，线程安全）"""
+        self._local_conf = float(conf)
+        self.log_message.emit("INFO", f"本地推理置信度已更新: {conf:.2f}")
+
     def start(self):
         if self._running:
             return

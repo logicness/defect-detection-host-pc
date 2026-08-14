@@ -166,6 +166,12 @@ class MainWindow(QMainWindow):
         c.tcp.connected.connect(self._on_nano_connected)
         c.tcp.disconnected.connect(self._on_nano_disconnected)
 
+        # Nano 系统状态轮询（连接时启动，断开停止）
+        c.tcp.status_received.connect(self._on_nano_status)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(5000)
+        self._status_timer.timeout.connect(self._poll_nano_status)
+
         # 模型管理（下位机清单/切换 → 标题栏与页面联动）
         self.model_ctl.models_updated.connect(self._on_models_updated)
         self.model_ctl.load_result.connect(self._on_model_load_result)
@@ -192,6 +198,7 @@ class MainWindow(QMainWindow):
         self.page_realtime.model_mgr_requested.connect(self._on_model_mgr)
         self.page_realtime.save_path_changed.connect(self._on_save_path_changed)
         self.page_realtime.reconnect_requested.connect(self._on_tcp_reconnect)
+        self.page_realtime.conf_changed.connect(self._on_conf_changed)
 
         # 参数页
         self.page_param.params_apply_requested.connect(self._on_params_apply)
@@ -284,17 +291,20 @@ class MainWindow(QMainWindow):
         # 新一次检测开始时，允许接收推理结果
         self._detection_paused = False
 
-        # 如果实时流已经在跑，这次点击视为「停止」请求，避免重复启动多条流
-        if self.stream_engine.is_running:
-            self._on_stop()
-            return
-
-        # 已加载本地图片 → 单帧推理（用户选图后的预期行为）
+        # 已加载本地图片 → 单帧推理（优先级最高，避免被实时流状态拦截）
         if self._local_image is not None:
+            # 如果实时流还在跑，先停止再继续本地推理
+            if self.stream_engine.is_running:
+                self._on_stop()
             self._local_image_active = True
             # 关键：推理期间必须启用「停止检测」按钮，否则用户无法停止/清框
             self.page_realtime.set_running(True)
             self._detect_local_image()
+            return
+
+        # 没有本地图片时的实时流启停控制
+        if self.stream_engine.is_running:
+            self._on_stop()
             return
 
         # 没有选择图片、也没有真实相机输入源 → 明确提示，绝不启动模拟流
@@ -690,6 +700,21 @@ class MainWindow(QMainWindow):
             _popup_info(self, "应用成功",
                         f"检测参数已应用（未连接下位机，仅本地生效）：\n置信度 {conf}")
 
+    def _on_conf_changed(self, conf: float):
+        """实时页置信度数值变化 → 即时下发（无需点应用，检测中直接生效）"""
+        try:
+            if self.controller.tcp.is_connected:
+                rois = [{"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
+                        for r in self._rois if r.get("enabled", True)]
+                self.controller.tcp.send_control(conf_thres=float(conf), rois=rois)
+            else:
+                self.stream_engine.set_local_conf(float(conf))
+            self.cfg.setdefault("detect", {})["conf"] = float(conf)
+            self.controller.log_message.emit(
+                "DEBUG", "参数", f"置信度实时更新: {conf:.2f}")
+        except Exception as e:
+            self._log_tcp_debug("WARN", f"实时置信度下发失败: {e}")
+
     # ================= 模型 =================
     def _on_load_model(self, name=""):
         """「加载模型」入口：打开模型选择对话框，默认显示「选择模型」Tab"""
@@ -772,6 +797,13 @@ class MainWindow(QMainWindow):
         self.controller.log_message.emit(
             "INFO", "模型", f"检测到开发板通信，已切换为开发板模型: {base}")
         self.status_left.setText(f"开发板已连接　|　模型: {base}")
+        # 启动 Nano 状态轮询
+        if not getattr(self, "_status_timer", None):
+            self._status_timer = QTimer(self)
+            self._status_timer.setInterval(5000)
+            self._status_timer.timeout.connect(self._poll_nano_status)
+        self._status_timer.start()
+        self._poll_nano_status()
         # 连接成功弹窗（10 秒内不重复，避免自动重连风暴频繁弹窗）
         now = time.time()
         if now - getattr(self, "_last_conn_popup_ts", 0) >= 10:
@@ -798,6 +830,38 @@ class MainWindow(QMainWindow):
             self.controller.log_message.emit("INFO", "模型", "开发板已断开，无本地模型")
         if not self.stream_engine.is_running:
             self.status_left.setText("就绪　|　检测帧率: -- FPS")
+        # 停止 Nano 状态轮询
+        if getattr(self, "_status_timer", None):
+            self._status_timer.stop()
+
+    # ---------------- Nano 状态轮询 ----------------
+    def _poll_nano_status(self):
+        """周期请求下位机系统状态（仅已连接时）"""
+        if self.controller.tcp.is_connected:
+            self.controller.tcp.request_status()
+
+    def _on_nano_status(self, status: dict):
+        """status_response → 状态栏显示 Nano GPU/CPU/内存/温度/推理耗时"""
+        try:
+            gpu = status.get("gpu_util")
+            cpu = status.get("cpu_util")
+            mem = status.get("mem_used_gb")
+            temp = status.get("gpu_temp")
+            ms = status.get("last_detect_ms")
+            parts = []
+            parts.append(f"GPU {gpu}%" if gpu is not None else "GPU --")
+            parts.append(f"CPU {cpu}%" if cpu is not None else "CPU --")
+            if mem is not None:
+                parts.append(f"内存 {mem:.1f}G")
+            if temp is not None:
+                parts.append(f"{temp:.0f}°C")
+            if ms is not None:
+                parts.append(f"推理 {ms:.0f}ms")
+            model = status.get("model")
+            suffix = f" | Nano: {model}" if model else ""
+            self.status_left.setText(" | ".join(parts) + suffix)
+        except Exception as e:
+            self._log_tcp_debug("WARN", f"状态显示异常: {e}")
 
     def _on_local_model_selected(self, path):
         import os

@@ -721,26 +721,6 @@ class ModelManagerDialog(QDialog):
         else:
             QMessageBox.information(self, "加载模型", "请先选择一个模型")
 
-    # ---------- Tab 1: 选择模型 数据 ----------
-    def _clear_detail(self):
-        self.detail_name.setText("未选择模型")
-        self.detail_source.setText("来源：--")
-        self.detail_quality.setText("质量：--")
-        self.detail_quality.setStyleSheet("font-size:16px; font-weight:600; color:#94a3b8; background:transparent;")
-        self.detail_dataset.setText("数据集：--")
-        self.detail_classes.setText("类别数：--")
-        self.detail_recommend.setText("")
-        self.detail_score.setValue(0)
-        self.detail_score.setStyleSheet(
-            "QProgressBar { border:1px solid #334155; border-radius:4px; text-align:center; "
-            "color:#f1f5f9; font-size:14px; background:#0b1120; height:22px; }"
-            "QProgressBar::chunk { border-radius:4px; background:#64748b; }")
-        self.detail_path.setText("路径：--")
-        self.detail_path.setToolTip("")
-        self.detail_size.setText("大小：--")
-        self.detail_desc.setText("说明：--")
-        self.btn_select_load.setEnabled(False)
-
     def _set_score_color(self, score: int):
         if score >= 80:
             color = "#22c55e"

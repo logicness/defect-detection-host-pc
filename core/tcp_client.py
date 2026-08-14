@@ -31,6 +31,7 @@ class TCPClient(QObject):
     model_upload_received = pyqtSignal(dict)  # model_upload_response
     model_status_received = pyqtSignal(dict)  # model_status（编译进度推送）
     model_delete_received = pyqtSignal(dict)  # model_delete_response
+    status_received = pyqtSignal(dict)        # status_response（Nano 系统状态）
 
     def __init__(self):
         super().__init__()
@@ -117,6 +118,10 @@ class TCPClient(QObject):
         """删除下位机端模型（激活模型会被拒绝）"""
         self._enqueue({"type": "model_delete_request", "model": name})
 
+    def request_status(self):
+        """请求下位机系统状态（GPU/CPU/内存/温度/最近推理耗时），响应经 status_received"""
+        self._enqueue({"type": "status_request"})
+
     def upload_model(self, path: str, progress_cb=None):
         """分片上传本地模型到下位机（后台线程执行）。
         progress_cb(received_bytes, total_bytes) 在子线程回调。
@@ -194,11 +199,11 @@ class TCPClient(QObject):
                         "WARN", f"连接失败({e})，{delay}s 后重试 ({retry}/{self.max_retries})")
                     time.sleep(delay)
                 else:
-                    # 重试耗尽不退出：开发板可能后开机/重启，持续后台自动重连
+                    # 手动连接模式：重试耗尽后停止，不再持续后台自动重连
                     self.log_message.emit(
-                        "WARN", f"连接失败({e})，持续自动重连中...")
-                    retry = 0
-                    time.sleep(5)
+                        "WARN", f"连接失败({e})，请检查下位机或手动点击「重新连接」")
+                    self._running = False
+                    break
             finally:
                 with self._lock:
                     self._connected = False
@@ -210,11 +215,9 @@ class TCPClient(QObject):
                         self._sock = None
                 if self._running:
                     self.disconnected.emit()
-                # 「秒断」防护：连接成功但存活不足 2 秒（对端立即断开），退避 1s，
-                # 避免 connect→recv EOF→reconnect 快速风暴刷日志/打满 CPU
-                if last_ok_ts and time.time() - last_ok_ts < 2.0 and self._running:
-                    self.log_message.emit("WARN", "连接存活过短，退避 1s 后重连")
-                    time.sleep(1.0)
+                # 手动连接模式：不自动重连，失败后直接退出循环
+                if self._running and last_ok_ts and time.time() - last_ok_ts < 2.0:
+                    self.log_message.emit("WARN", "连接存活过短，请手动点击「重新连接」")
 
     def _heartbeat_loop(self):
         """心跳 + 看门狗：3 个周期无任何接收 → 判定对端失联，主动重连"""
@@ -294,6 +297,8 @@ class TCPClient(QObject):
                     self.model_status_received.emit(payload)
                 elif t == "model_delete_response":
                     self.model_delete_received.emit(payload)
+                elif t == "status_response":
+                    self.status_received.emit(payload)
                 elif t == "error":
                     self.error_occurred.emit(payload.get("message", "未知错误"))
                 else:

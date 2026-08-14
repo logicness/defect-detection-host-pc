@@ -1,7 +1,7 @@
 """
 P5 运行日志页（设计稿图 5）
 日志筛选（级别/模块分段 + 时间 + 关键词 + 查询/实时刷新/导出/清空）
-实时日志表 | 日志详情 + 系统状态（运行时间/帧率/CPU/内存/NPU/磁盘）
+实时日志表 | 日志详情 + 系统状态（运行时间/帧率/CPU/内存/磁盘）
 底部：日志总数统计 + 当前时间
 """
 import csv
@@ -152,7 +152,7 @@ class RunLogPage(QWidget):
         r.addWidget(self.lbl_fps, 1)
         s.body.addLayout(r)
         self.bars = {}
-        for name in ("CPU", "内存", "NPU"):
+        for name in ("CPU", "内存"):
             row = QHBoxLayout()
             row.addWidget(_lbl(name))
             bar = QProgressBar()
@@ -276,7 +276,6 @@ class RunLogPage(QWidget):
             disk = psutil.disk_usage("D:/")
             self._set_bar("CPU", cpu)
             self._set_bar("内存", mem)
-            self._set_bar("NPU", 0)  # 预留：RK3568 NPU 占用待接入
             self.lbl_disk.setText(f"{disk.free / (1024 ** 3):.0f} GB")
         except Exception:
             pass

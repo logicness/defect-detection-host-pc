@@ -151,27 +151,38 @@ class ImagePreview(QWidget):
                            self._handle_size, self._handle_size,
                            QColor("#4ade80"))
 
-        # 缺陷框：双层描边 + 角标 + 标签，确保在复杂背景下清晰可辨
+        # 缺陷框：半透明填充 + 细描边 + 角标 + 标签，避免粗描边造成填充错觉
         for d in self._dets:
             cls, conf, x1, y1, x2, y2 = d[:6]
+            # clamp 到图像范围内，避免坐标异常导致矩形出界
+            iw_f, ih_f = float(self._img.width()), float(self._img.height())
+            x1 = max(0.0, min(iw_f, x1))
+            y1 = max(0.0, min(ih_f, y1))
+            x2 = max(0.0, min(iw_f, x2))
+            y2 = max(0.0, min(ih_f, y2))
             # 统一转 int（QPainter.drawLine/drawRect/drawText 的标量重载需 int）
             rx = int(ox + x1 * s)
             ry = int(oy + y1 * s)
             rw = int((x2 - x1) * s)
             rh = int((y2 - y1) * s)
+            # 过滤无效框
+            if rw <= 1 or rh <= 1:
+                continue
             rect = QRectF(rx, ry, rw, rh)
 
-            # 外层高对比描边（黑色半透明）
-            p.setPen(QPen(QColor(0, 0, 0, 180), 4))
+            # 不填充内部，只画边框
+            p.setBrush(Qt.NoBrush)
+            # 外层高对比描边（黑色半透明，2px）
+            p.setPen(QPen(QColor(0, 0, 0, 180), 2))
             p.drawRect(rect)
-            # 内层高亮描边（亮红）
+            # 内层高亮描边（亮红，2px）
             p.setPen(QPen(QColor("#ff5252"), 2))
             p.drawRect(rect)
 
             # 四角小标记，提高定位精度
-            corner = int(min(12.0, min(rw, rh) * 0.25))
+            corner = int(min(10.0, min(rw, rh) * 0.18))
             if corner > 3:
-                p.setPen(QPen(QColor("#ffffff"), 2))
+                p.setPen(QPen(QColor("#ffffff"), 1))
                 # 左上
                 p.drawLine(rx, ry + corner, rx, ry)
                 p.drawLine(rx, ry, rx + corner, ry)
