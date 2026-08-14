@@ -34,6 +34,7 @@ def _popup(parent, title: str, text: str):
 class HistoryRecordPage(QWidget):
     query_requested = pyqtSignal(dict, int, int)   # (filters, limit, offset)
     export_requested = pyqtSignal(dict)
+    report_requested = pyqtSignal(dict)            # U9 检测报告导出
     clear_history_requested = pyqtSignal()         # 请求清空所有检测记录
 
     def __init__(self, parent=None):
@@ -103,6 +104,9 @@ class HistoryRecordPage(QWidget):
         btn_r.clicked.connect(self._reset)
         btn_e = QPushButton("⤓ 导出记录")
         btn_e.clicked.connect(lambda: self.export_requested.emit(self.get_filters()))
+        btn_rp = QPushButton("📊 导出报告")
+        btn_rp.setToolTip("导出检测报告（NG 拼图 + 统计），HTML 格式")
+        btn_rp.clicked.connect(lambda: self.report_requested.emit(self.get_filters()))
         btn_c = QPushButton("🗑 清空记录")
         btn_c.setToolTip("清空所有检测记录（不可恢复，请先导出备份）")
         btn_c.clicked.connect(self._on_clear_history)
@@ -121,6 +125,7 @@ class HistoryRecordPage(QWidget):
         row.addWidget(btn_q)
         row.addWidget(btn_r)
         row.addWidget(btn_e)
+        row.addWidget(btn_rp)
         row.addWidget(btn_c)
         card.body.addLayout(row)
         return card

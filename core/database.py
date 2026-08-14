@@ -162,6 +162,35 @@ class DatabaseManager(QObject):
                             r["defect_type"], r["confidence"], r["area"], r["image_path"]])
         return len(rows)
 
+    def export_report(self, path: str, **filters) -> dict:
+        """导出检测报告（U9，2026-08-14）：
+        统计 + 生成 HTML（NG 拼图/缺陷分布）+ 保存到 path。
+        返回 {'count','ng','ok','yield','defect_dist','ng_paths','saved': path}。
+        """
+        from core.report_gen import save_report
+        rows = self.query_records(limit=1000000, **filters)
+        ng_paths, ok, dist = [], 0, {}
+        for r in rows:
+            if r["result"] == "NG":
+                ng_paths.append(r["image_path"] or "")
+                key = r["defect_type"] or "未知"
+                dist[key] = dist.get(key, 0) + 1
+            else:
+                ok += 1
+        ng = len(rows) - ok
+        total = len(rows)
+        report = {
+            "count": total,
+            "ng": ng,
+            "ok": ok,
+            "yield": round(ok / total * 100, 2) if total else 0.0,
+            "defect_dist": dist,
+            "ng_paths": [p for p in ng_paths if p],
+            "records": rows,
+        }
+        report["saved"] = save_report(path, report) if total else ""
+        return report
+
     def clean_old_records(self, keep_days: int = 30) -> int:
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")

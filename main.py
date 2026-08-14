@@ -211,6 +211,7 @@ class MainWindow(QMainWindow):
         # 历史页
         self.page_history.query_requested.connect(self._on_history_query)
         self.page_history.export_requested.connect(self._on_history_export)
+        self.page_history.report_requested.connect(self._on_history_report)
         self.page_history.clear_history_requested.connect(self._on_history_clear)
 
         # 通信页
@@ -906,6 +907,30 @@ class MainWindow(QMainWindow):
         n = self.controller.db.export_csv(path, **filters)
         self.controller.log_message.emit("INFO", "历史", f"已导出 {n} 条到 {path}")
         _popup_info(self, "导出成功", f"已导出 {n} 条检测记录到：\n{path}")
+
+    def _on_history_report(self, filters):
+        """U9 检测报告导出（NG 拼图 + 统计，HTML）"""
+        default_name = f"defect_report_{time.strftime('%Y%m%d_%H%M%S')}.html"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出检测报告", default_name, "HTML 报告 (*.html)")
+        if not path:
+            return
+        try:
+            report = self.controller.db.export_report(path, **filters)
+            if report["count"] == 0:
+                _popup_info(self, "无数据", "当前筛选条件下没有检测记录")
+                return
+            self.controller.log_message.emit(
+                "INFO", "历史",
+                f"已导出报告: {report['count']} 条 (NG {report['ng']}, "
+                f"良率 {report['yield']}%)")
+            _popup_info(self, "导出成功",
+                        f"检测报告已导出：\n{path}\n\n"
+                        f"记录 {report['count']} 条 · NG {report['ng']} · "
+                        f"良率 {report['yield']}%")
+        except Exception as e:
+            self.controller.log_message.emit("ERROR", "历史", f"报告导出失败: {e}")
+            _popup_info(self, "导出失败", f"报告导出失败：\n{e}")
 
     def _on_history_clear(self):
         """清空所有检测记录与生产统计"""
