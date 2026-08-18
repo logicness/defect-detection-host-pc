@@ -57,8 +57,12 @@ def resolve_class_names(model_path: str):
         return MVIT_CASTING_BILLET_CLASSES
     if "mhpsds" in name or "mhpsds" in p:
         return MVIT_MHPSDS_CLASSES
-    if "steel_pipe" in name or "steel_pipe" in p:
+    # 钢管：英文 steel_pipe 或中文 钢管（模型文件名可能为中文）
+    if any(k in name or k in p for k in ("steel_pipe", "钢管")):
         return MVIT_STEEL_PIPE_CLASSES
+    # 中厚板（MVIT plate）
+    if any(k in name or k in p for k in ("mvit_plate", "plate", "中厚板")):
+        return MVIT_MHPSDS_CLASSES
     if "neu" in name or "neu" in p or "neu-det" in p or "neu_det" in p:
         return NEU_CLASSES
     return []

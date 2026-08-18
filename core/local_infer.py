@@ -136,11 +136,24 @@ class LocalInferEngine(QObject):
 
         session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         input_name = session.get_inputs()[0].name
-        input_shape = session.get_inputs()[0].shape  # [1,3,640,640]
+        input_shape = session.get_inputs()[0].shape  # [1,3,W,H] 或 [1,3,W,H]
+        # 动态读取输入尺寸（兼容 SDX 256x256 / NEU 640x640 等不同模型）
+        target = 640
+        try:
+            # 动态维度可能是 int 或 'width'/'height'/'W'/'H' 字符串
+            _h = input_shape[2] if len(input_shape) > 2 else None
+            _w = input_shape[3] if len(input_shape) > 3 else None
+            if isinstance(_w, int) and _w > 0:
+                target = _w
+            elif isinstance(_h, int) and _h > 0:
+                target = _h
+        except Exception:
+            pass
+        if target not in (256, 320, 384, 416, 512, 640, 1024):
+            target = 640  # 兜底
 
         # letterbox 预处理
         h0, w0 = img.shape[:2]
-        target = 640
         scale = min(target / w0, target / h0)
         new_w, new_h = int(w0 * scale), int(h0 * scale)
         resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
@@ -193,8 +206,22 @@ def infer_frame(session, frame, conf_thres=0.25, iou_thres=0.45,
     """对 BGR 帧执行 ONNX 推理 → UI 格式 [(cls, conf, x1, y1, x2, y2), ...]"""
     from core.local_postprocess import yolo_postprocess
 
-    h0, w0 = frame.shape[:2]
+    # 动态读取输入尺寸（兼容 SDX 256x256 等非 640 模型）
+    inp = session.get_inputs()[0].shape
     target = 640
+    try:
+        _h = inp[2] if len(inp) > 2 else None
+        _w = inp[3] if len(inp) > 3 else None
+        if isinstance(_w, int) and _w > 0:
+            target = _w
+        elif isinstance(_h, int) and _h > 0:
+            target = _h
+    except Exception:
+        pass
+    if target not in (256, 320, 384, 416, 512, 640, 1024):
+        target = 640  # 兜底
+
+    h0, w0 = frame.shape[:2]
     scale = min(target / w0, target / h0)
     new_w, new_h = int(w0 * scale), int(h0 * scale)
     resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)

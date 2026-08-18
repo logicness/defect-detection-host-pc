@@ -9,8 +9,9 @@ def yolo_postprocess(output, scale, pad_w, pad_h, conf_thres=0.25, iou_thres=0.4
     返回: [{"box": [x1,y1,x2,y2], "confidence": f, "class_id": i, "result": "NG"}, ...]
     """
     pred = np.squeeze(output)
-    if pred.ndim == 2 and pred.shape[0] in (84, 85, 10):
-        pred = pred.transpose(1, 0)  # (8400, 4+classes)
+    # 通用转置判断：输出为 (C, N) 且 C 是 4+classes 通道数（6/10/25/80 等）时转成 (N, C)
+    if pred.ndim == 2 and pred.shape[0] in (10, 29, 84, 85, 94):
+        pred = pred.transpose(1, 0)  # (anchors, 4+classes)
 
     n_anchors, n_feat = pred.shape
     n_classes = n_feat - 4

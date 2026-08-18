@@ -42,7 +42,8 @@ class NGSaver:
         if frame is None or not low:
             return False
         try:
-            self._q.put_nowait(("low", frame, dets, frame_id))
+            # 只归档低置信子集，避免把高置信框也写进 LOW_CONF
+            self._q.put_nowait(("low", frame, low, frame_id))
             return True
         except queue.Full:
             self.stats["dropped"] += 1

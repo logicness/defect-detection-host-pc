@@ -19,13 +19,13 @@ import time
 HOST_PC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = sys.executable
 
-# (脚本名, 简述, 预计秒)
+# (脚本名, 简述, 预计秒, optional)   # optional=True 失败仅告警不阻断（如依赖外部设备的测试）
 TESTS = [
-    ("tools/smoke_test.py",        "主窗口+5页+模拟流+历史+PLC", 90),
-    ("tools/test_no_sim_start.py", "无图/无连接不启模拟流+本地推理", 120),
-    ("tools/test_model_mgr.py",    "模型管理 v3 全功能", 60),
-    # 通信调试（需 Nano 在线，失败仅告警不阻断）
-    ("tools/debug_comm_test.py",   "TCP 心跳/模型列表/推理", 60),
+    ("tools/smoke_test.py",        "主窗口+5页+模拟流+历史+PLC", 90, False),
+    ("tools/test_no_sim_start.py", "无图/无连接不启模拟流+本地推理", 120, False),
+    ("tools/test_model_mgr.py",    "模型管理 v3 全功能", 60, False),
+    # 通信调试（需 Nano 在线；离线时失败仅告警不阻断）
+    ("tools/debug_comm_test.py",   "TCP 心跳/模型列表/推理", 60, True),
 ]
 
 
@@ -59,7 +59,7 @@ def run_one(name: str, desc: str, timeout: int) -> bool:
 def main():
     args = sys.argv[1:]
     if "--list" in args:
-        for name, desc, _t in TESTS:
+        for name, desc, _t, _o in TESTS:
             print(f"  {name:<40} {desc}")
         return 0
 
@@ -74,17 +74,24 @@ def main():
     print(f"=== 上位机回归测试（{len(targets)} 项）===")
     print(f"Python: {PYTHON}\n")
     results = []
-    for name, desc, timeout in targets:
-        results.append((name, run_one(name, desc, timeout)))
+    for name, desc, timeout, optional in targets:
+        ok = run_one(name, desc, timeout)
+        results.append((name, ok, optional))
+        if not ok and optional:
+            print(f"  [可选] {name} 失败（依赖外部设备，不阻断）\n")
 
-    passed = sum(1 for _, ok in results if ok)
-    failed = len(results) - passed
+    passed = sum(1 for _, ok, _o in results if ok)
+    failed = [n for n, ok, o in results if not ok and not o]
+    optional_failed = [n for n, ok, o in results if not ok and o]
     print(f"\n=== 结果: {passed}/{len(results)} 通过 ===")
+    if optional_failed:
+        print(f"可选失败(设备离线): {len(optional_failed)} 项")
+        for n in optional_failed:
+            print(f"  ⚠ {n}")
     if failed:
         print("失败项:")
-        for name, ok in results:
-            if not ok:
-                print(f"  ✗ {name}")
+        for n in failed:
+            print(f"  ✗ {n}")
         return 1
     print("全部通过 ✅")
     return 0

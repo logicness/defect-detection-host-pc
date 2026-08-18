@@ -4,6 +4,7 @@
 """
 import json
 import os
+import sys
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CONFIG_PATH = os.path.join(DATA_DIR, "host_config.json")
@@ -52,6 +53,17 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    """保存配置（原子写入 + 异常兜底，失败不抛错仅记录，避免主流程崩溃）"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        # 原子写入：先写临时文件再替换，避免写一半损坏配置
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_PATH)
+    except Exception as e:
+        # 文件被占用/权限问题等：不阻塞主流程（配置丢失可容忍，界面崩溃不可容忍）
+        try:
+            print(f"[config] 保存配置失败(忽略): {e}", file=sys.stderr)
+        except Exception:
+            pass

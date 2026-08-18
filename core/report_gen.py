@@ -45,6 +45,12 @@ def _read_thumbnail(path: str, max_w: int = 200, max_h: int = 200):
         return None
 
 
+def _esc(s) -> str:
+    """HTML 转义（报告内容来自数据库，防注入）"""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
+
+
 def _defect_bar(dist: dict) -> str:
     """缺陷类型分布 → 内嵌 SVG 横向条形图"""
     if not dist:
@@ -54,9 +60,10 @@ def _defect_bar(dist: dict) -> str:
     rows = []
     for name, cnt in items:
         w = int(cnt / mx * 220)
+        safe_name = _esc(name)
         rows.append(
             f'<div style="margin:4px 0"><span style="display:inline-block;'
-            f'width:140px;color:#e2e8f0;font-size:13px">{name}</span>'
+            f'width:140px;color:#e2e8f0;font-size:13px">{safe_name}</span>'
             f'<span style="display:inline-block;background:#ef4444;'
             f'border-radius:3px;width:{w}px;height:14px;vertical-align:middle"></span>'
             f'<span style="margin-left:6px;color:#94a3b8;font-size:13px">{cnt}</span></div>')
@@ -111,9 +118,9 @@ def build_report_html(report: dict, title: str = "缺陷检测报告") -> str:
 
     html = f"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
-<title>{title}</title></head>
+<title>{_esc(title)}</title></head>
 <body style="margin:0;background:#020617;font-family:'Microsoft YaHei',sans-serif;padding:28px">
-  <h2 style="color:#f1f5f9;margin:0 0 6px">{title}</h2>
+  <h2 style="color:#f1f5f9;margin:0 0 6px">{_esc(title)}</h2>
   <p style="color:#94a3b8;font-size:13px;margin:0 0 20px">
     生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
   {kpis}
