@@ -606,6 +606,19 @@ class MainWindow(QMainWindow):
     def _on_ng_alarm(self, count):
         self.controller.log_message.emit(
             "ERROR", "检测", f"连续 {count} 次检出缺陷，请检查产线状态！")
+        # 微信告警推送（企业微信/Server酱，配置 data/alarm_config.json）
+        try:
+            from core.alarm import get_pusher
+            st = self.controller.get_stats()
+            msg = (f"⚠️ 缺陷检测告警\n"
+                   f"连续 {count} 次检出缺陷\n"
+                   f"当前累计: 总 {st['total']} / 缺陷 {st['defect']} / 良率 "
+                   f"{st['pass']/st['total']*100:.1f}%\n"
+                   f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            if get_pusher().push(msg):
+                self.controller.log_message.emit("INFO", "告警", "微信告警已推送")
+        except Exception as e:
+            self.controller.log_message.emit("WARN", "告警", f"微信告警失败: {e}")
         if QApplication.platformName() == "offscreen":
             return  # 无头模式不弹窗
 
