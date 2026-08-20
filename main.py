@@ -871,6 +871,9 @@ class MainWindow(QMainWindow):
             self._status_timer.timeout.connect(self._poll_nano_status)
         self._status_timer.start()
         self._poll_nano_status()
+        # 连接开发板后默认切换为 Nano 下位机检测 + 拉取清单同步激活模型
+        self.page_realtime.set_infer_source("Nano 下位机模型")
+        self.model_ctl.refresh()
         self.page_log.set_nano_online(True)
         # 连接成功弹窗（10 秒内不重复，避免自动重连风暴频繁弹窗）
         now = time.time()
@@ -901,6 +904,8 @@ class MainWindow(QMainWindow):
         # 停止 Nano 状态轮询
         if getattr(self, "_status_timer", None):
             self._status_timer.stop()
+        # 断开后切回 PC 本地检测
+        self.page_realtime.set_infer_source("PC 本地模型")
         self.page_log.set_nano_online(False)
 
     # ---------------- Nano 状态轮询 ----------------

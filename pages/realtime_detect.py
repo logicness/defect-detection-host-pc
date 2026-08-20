@@ -112,6 +112,12 @@ class RealtimeDetectPage(QWidget):
     def get_infer_source(self) -> str:
         return self.combo_source.currentText()
 
+    def set_infer_source(self, name: str):
+        """设置推理源下拉（PC 本地模型 / Nano 下位机模型）"""
+        idx = self.combo_source.findText(name)
+        if idx >= 0:
+            self.combo_source.setCurrentIndex(idx)
+
     def update_nav(self, index: int, total: int):
         """兼容占位：上一张/下一张功能已移除（8-20），保留签名供 main.py 调用"""
         pass
