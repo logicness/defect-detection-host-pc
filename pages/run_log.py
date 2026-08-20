@@ -5,13 +5,14 @@ P5 运行日志页（设计稿图 5）
 底部：日志总数统计 + 当前时间
 """
 import csv
+import math
 import time
 from collections import deque
 
 import psutil
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QDateTimeEdit, QProgressBar, QFileDialog, QHeaderView, QMessageBox,
+    QDateTimeEdit, QFileDialog, QHeaderView, QMessageBox,
     QFrame, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QDateTime, QRectF
@@ -116,6 +117,211 @@ class MiniTrend(QWidget):
             p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), 60), 1))
             p.drawLine(int(scan_x), r.top() + 2, int(scan_x), r.bottom() - 2)
 
+        p.end()
+
+
+class _Smooth(object):
+    """数值平滑器：displayed 以指数缓动逼近 target，产生流畅动画"""
+
+    def __init__(self):
+        self.target = 0.0
+        self.disp = 0.0
+
+    def step(self):
+        self.disp += (self.target - self.disp) * 0.16
+        if abs(self.target - self.disp) < 0.05:
+            self.disp = self.target
+        return self.disp
+
+
+class RingGauge(QWidget):
+    """环形仪表：渐变弧 + 圆头 + 呼吸外发光 + 中心数值，数值平滑动画（~30fps）"""
+
+    def __init__(self, title, color="#22d3ee", unit="%", maxv=100.0, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._color = QColor(color)
+        self._unit = unit
+        self._maxv = maxv
+        self._val = _Smooth()
+        self._offline = False
+        self._phase = 0.0
+        self.setMinimumSize(96, 96)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._anim = QTimer(self)
+        self._anim.timeout.connect(self._tick_anim)
+        self._anim.start(33)
+
+    def set_value(self, v):
+        try:
+            self._val.target = max(0.0, min(float(v), self._maxv))
+            self._offline = False
+        except Exception:
+            pass
+
+    def set_offline(self, off=True):
+        self._offline = off
+
+    def _tick_anim(self):
+        self._val.step()
+        self._phase = (self._phase + 0.04) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect())
+        side = min(rect.width(), rect.height())
+        sq = QRectF(0, 0, side, side)
+        sq.moveCenter(rect.center())
+        thick = max(6.0, side * 0.10)
+        ring = sq.adjusted(thick * 0.8, thick * 0.8, -thick * 0.8, -thick * 0.8)
+        c = self._color
+
+        # 底环
+        p.setPen(QPen(QColor("#1e293b"), thick, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(ring, 0, 360 * 16)
+
+        if not self._offline and self._val.disp > 0.5:
+            frac = max(0.0, min(1.0, self._val.disp / self._maxv)) if self._maxv else 0
+            span = int(frac * 360 * 16)
+            start = 90 * 16
+            # 呼吸外发光（alpha 随 phase 微动）
+            glow_a = 40 + int(20 * (0.5 + 0.5 * math.sin(self._phase * 6.283)))
+            p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), glow_a),
+                          thick * 2.1, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, start, -span)
+            # 主渐变弧
+            grad = QLinearGradient(ring.left(), ring.top(), ring.right(), ring.bottom())
+            grad.setColorAt(0, c)
+            grad.setColorAt(1, QColor("#38bdf8"))
+            p.setPen(QPen(grad, thick, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(ring, start, -span)
+
+        # 中心数值
+        p.setPen(QColor("#f1f5f9") if not self._offline else QColor("#64748b"))
+        p.setFont(QFont("Microsoft YaHei", int(side * 0.20), QFont.Bold))
+        val_txt = "--" if self._offline else f"{self._val.disp:.0f}"
+        p.drawText(QRectF(sq).adjusted(0, -side * 0.08, 0, 0), Qt.AlignCenter, val_txt)
+        # 标题 + 单位
+        p.setFont(QFont("Microsoft YaHei", max(8, int(side * 0.09))))
+        p.setPen(QColor("#94a3b8"))
+        suffix = "" if self._offline else self._unit
+        p.drawText(QRectF(sq).adjusted(0, side * 0.16, 0, 0), Qt.AlignCenter,
+                   f"{self._title}{suffix}")
+        p.end()
+
+
+class GlowBar(QWidget):
+    """水平发光条：圆角轨道 + 渐变填充 + 流动高光"""
+
+    def __init__(self, color="#22d3ee", parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._val = _Smooth()
+        self._offline = False
+        self._phase = 0.0
+        self.setFixedHeight(20)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._anim = QTimer(self)
+        self._anim.timeout.connect(self._tick_anim)
+        self._anim.start(40)
+
+    def set_value(self, pct):
+        try:
+            self._val.target = max(0.0, min(float(pct), 100.0))
+            self._offline = False
+        except Exception:
+            pass
+
+    def set_offline(self, off=True):
+        self._offline = off
+
+    def _tick_anim(self):
+        self._val.step()
+        self._phase = (self._phase + 0.03) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 6, -1, -6)
+        c = self._color
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#1e293b"))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        if not self._offline and self._val.disp > 0.5:
+            w = r.width() * self._val.disp / 100.0
+            fill = QRectF(r.left(), r.top(), max(w, r.height()), r.height())
+            grad = QLinearGradient(r.left(), 0, r.right(), 0)
+            grad.setColorAt(0, c)
+            grad.setColorAt(1, QColor("#38bdf8"))
+            p.setBrush(QColor(c.red(), c.green(), c.blue(), 45))
+            p.drawRoundedRect(fill.adjusted(-1, -2, 1, 2), 6, 6)
+            p.setBrush(grad)
+            p.drawRoundedRect(fill, r.height() / 2, r.height() / 2)
+            # 流动高光
+            sheen_x = r.left() + self._phase * max(w - 6, 1)
+            p.setBrush(QColor(255, 255, 255, 60))
+            p.drawRoundedRect(QRectF(sheen_x, r.top() + 1.5, 6, r.height() - 3), 3, 3)
+        p.end()
+
+
+class StatChip(QFrame):
+    """指标小卡片：标题 + 大数值"""
+
+    def __init__(self, title, color="#e2e8f0", parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            "StatChip{background:#0f172a; border:1px solid #1e293b; border-radius:8px;}")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 6, 10, 6)
+        v.setSpacing(2)
+        self.t = QLabel(title)
+        self.t.setStyleSheet("color:#64748b; font-size:12px; background:transparent; border:none;")
+        self.v = QLabel("--")
+        self.v.setStyleSheet(
+            f"color:{color}; font-size:16px; font-weight:600; background:transparent; border:none;")
+        v.addWidget(self.t)
+        v.addWidget(self.v)
+
+    def set_value(self, text, color=None):
+        self.v.setText(text)
+        if color:
+            self.v.setStyleSheet(
+                f"color:{color}; font-size:16px; font-weight:600; background:transparent; border:none;")
+
+
+class PulseDot(QWidget):
+    """连接状态呼吸灯：在线绿/离线红，alpha 呼吸动画"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+        self._online = False
+        self._phase = 0.0
+        self._anim = QTimer(self)
+        self._anim.timeout.connect(self._tick)
+        self._anim.start(60)
+
+    def set_online(self, on):
+        self._online = on
+
+    def _tick(self):
+        self._phase = (self._phase + 0.06) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        col = QColor("#22c55e") if self._online else QColor("#ef4444")
+        a = 60 + int(120 * (0.5 + 0.5 * math.sin(self._phase * 6.283)))
+        r = QRectF(self.rect())
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(col.red(), col.green(), col.blue(), a // 3))
+        p.drawEllipse(r)
+        p.setBrush(col)
+        p.drawEllipse(r.adjusted(4, 4, -4, -4))
         p.end()
 
 
@@ -233,96 +439,75 @@ class RunLogPage(QWidget):
         col.addWidget(d)
 
         s = Card("系统状态")
-        # 本机运行时间 / 帧率
-        self.lbl_uptime = QLabel("00:00:00")
-        self.lbl_uptime.setStyleSheet("color:#e2e8f0; font-size:16px; background:transparent;")
-        self.lbl_fps = QLabel("0 FPS")
-        self.lbl_fps.setStyleSheet("color:#e2e8f0; font-size:16px; background:transparent;")
-        r = QHBoxLayout()
-        r.addWidget(_lbl("运行时间"))
-        r.addWidget(self.lbl_uptime, 1)
-        r.addWidget(_lbl("检测帧率"))
-        r.addWidget(self.lbl_fps, 1)
-        s.body.addLayout(r)
-        # 本机 CPU/内存/磁盘
-        self.bars = {}
-        for name in ("CPU", "内存"):
-            row = QHBoxLayout()
-            row.addWidget(_lbl(name))
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(8)
-            bar.setStyleSheet(
-                "QProgressBar{background:#1e293b; border:none; border-radius:4px;}"
-                "QProgressBar::chunk{background:#22c55e; border-radius:4px;}")
-            row.addWidget(bar, 1)
-            pct = QLabel("0%")
-            pct.setFixedWidth(40)
-            pct.setStyleSheet("color:#94a3b8; background:transparent;")
-            row.addWidget(pct)
-            s.body.addLayout(row)
-            self.bars[name] = (bar, pct)
-        row = QHBoxLayout()
-        row.addWidget(_lbl("磁盘剩余"))
-        self.lbl_disk = QLabel("--")
-        self.lbl_disk.setStyleSheet("color:#e2e8f0; background:transparent;")
-        row.addWidget(self.lbl_disk, 1)
-        s.body.addLayout(row)
-        # 分隔线
+        # ---- 本机性能 ----
+        head = QHBoxLayout()
+        self.dot_local = PulseDot()
+        self.dot_local.set_online(True)
+        head.addWidget(self.dot_local)
+        head.addWidget(_lbl("本机性能"))
+        head.addStretch()
+        s.body.addLayout(head)
+
+        rings = QHBoxLayout()
+        rings.setSpacing(8)
+        self.ring_cpu = RingGauge("CPU", "#22c55e")
+        self.ring_mem = RingGauge("内存", "#38bdf8")
+        self.chip_disk = StatChip("磁盘剩余", "#e2e8f0")
+        rings.addWidget(self.ring_cpu, 1)
+        rings.addWidget(self.ring_mem, 1)
+        rings.addWidget(self.chip_disk, 1)
+        s.body.addLayout(rings)
+
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        self.chip_uptime = StatChip("运行时间", "#e2e8f0")
+        self.chip_fps = StatChip("检测帧率", "#22d3ee")
+        chips.addWidget(self.chip_uptime, 1)
+        chips.addWidget(self.chip_fps, 1)
+        s.body.addLayout(chips)
+
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("color:#1e293b; background:#1e293b; max-height:1px; border:none;")
         s.body.addWidget(sep)
-        # Nano GPU 监控
-        self._init_nano_monitor(s)
-        col.addWidget(s)
-        return col
 
-    # ---------- Nano GPU 监控 ----------
-    def _init_nano_monitor(self, card):
-        self.lbl_nano_state = QLabel("● 未连接")
+        # ---- Nano GPU 监控 ----
+        nhead = QHBoxLayout()
+        self.dot_nano = PulseDot()
+        nhead.addWidget(self.dot_nano)
+        nhead.addWidget(_lbl("Nano GPU 监控"))
+        nhead.addStretch()
+        self.lbl_nano_state = QLabel("未连接")
         self.lbl_nano_state.setStyleSheet(
             "color:#ef4444; font-size:14px; background:transparent;")
-        head = QHBoxLayout()
-        head.addWidget(_lbl("Nano GPU 监控"))
-        head.addStretch()
-        head.addWidget(self.lbl_nano_state)
-        card.body.addLayout(head)
+        nhead.addWidget(self.lbl_nano_state)
+        s.body.addLayout(nhead)
 
-        # Nano GPU / 内存进度条（样式与 PC 端一致）
-        self.nano_bars = {}
-        for name in ("GPU", "Nano内存"):
-            row = QHBoxLayout()
-            row.addWidget(_lbl(name))
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(8)
-            bar.setStyleSheet(
-                "QProgressBar{background:#1e293b; border:none; border-radius:4px;}"
-                "QProgressBar::chunk{background:#22d3ee; border-radius:4px;}")
-            row.addWidget(bar, 1)
-            pct = QLabel("--")
-            pct.setFixedWidth(56)
-            pct.setStyleSheet("color:#94a3b8; background:transparent;")
-            row.addWidget(pct)
-            card.body.addLayout(row)
-            self.nano_bars[name] = (bar, pct)
-        self.lbl_nano_gpu = self.nano_bars["GPU"][1]
-        self.lbl_nano_mem = self.nano_bars["Nano内存"][1]
-
-        # 温度 / 推理耗时行
-        self.lbl_nano_temp = QLabel("温度: --")
-        self.lbl_nano_ms = QLabel("推理: --")
-        for lb in (self.lbl_nano_temp, self.lbl_nano_ms):
-            lb.setStyleSheet(
-                "color:#e2e8f0; font-size:14px; background:transparent;")
-        row = QHBoxLayout()
-        row.addWidget(self.lbl_nano_temp)
-        row.addStretch()
-        row.addWidget(self.lbl_nano_ms)
-        card.body.addLayout(row)
+        nrow = QHBoxLayout()
+        nrow.setSpacing(10)
+        self.ring_gpu = RingGauge("GPU", "#22d3ee")
+        nrow.addWidget(self.ring_gpu, 2)
+        rightcol = QVBoxLayout()
+        rightcol.setSpacing(8)
+        memrow = QHBoxLayout()
+        memrow.setSpacing(6)
+        memrow.addWidget(_lbl("Nano内存"))
+        self.bar_nano_mem = GlowBar("#a78bfa")
+        memrow.addWidget(self.bar_nano_mem, 1)
+        self.lbl_nano_mem = QLabel("--")
+        self.lbl_nano_mem.setFixedWidth(70)
+        self.lbl_nano_mem.setStyleSheet("color:#94a3b8; background:transparent;")
+        memrow.addWidget(self.lbl_nano_mem)
+        rightcol.addLayout(memrow)
+        trow = QHBoxLayout()
+        trow.setSpacing(8)
+        self.chip_temp = StatChip("温度", "#fb923c")
+        self.chip_ms = StatChip("推理耗时", "#a78bfa")
+        trow.addWidget(self.chip_temp, 1)
+        trow.addWidget(self.chip_ms, 1)
+        rightcol.addLayout(trow)
+        nrow.addLayout(rightcol, 3)
+        s.body.addLayout(nrow)
 
         # 三个趋势图
         self.chart_gpu = MiniTrend("GPU %", "#22d3ee", 100)
@@ -333,13 +518,14 @@ class RunLogPage(QWidget):
         charts.addWidget(self.chart_gpu, 1)
         charts.addWidget(self.chart_temp, 1)
         charts.addWidget(self.chart_ms, 1)
-        card.body.addLayout(charts)
+        s.body.addLayout(charts)
 
-        # 当前模型
         self.lbl_nano_model = QLabel("模型: --")
         self.lbl_nano_model.setStyleSheet(
             "color:#94a3b8; font-size:13px; background:transparent;")
-        card.body.addWidget(self.lbl_nano_model)
+        s.body.addWidget(self.lbl_nano_model)
+        col.addWidget(s)
+        return col
 
     # ---------- 底部 ----------
     def _build_bottom(self):
@@ -384,7 +570,8 @@ class RunLogPage(QWidget):
 
     def update_nano_status(self, status: dict):
         """Nano status_response → 更新 GPU/内存/温度/推理耗时/模型"""
-        self.lbl_nano_state.setText("● 在线")
+        self.dot_nano.set_online(True)
+        self.lbl_nano_state.setText("在线")
         self.lbl_nano_state.setStyleSheet(
             "color:#22c55e; font-size:14px; background:transparent;")
         gpu = status.get("gpu_util")
@@ -394,34 +581,36 @@ class RunLogPage(QWidget):
         mem_total = status.get("mem_total_gb")
         model = status.get("model")
         if gpu is not None:
-            self._set_nano_bar("GPU", float(gpu), f"{gpu:.0f}%")
+            self.ring_gpu.set_value(float(gpu))
             self.chart_gpu.add_value(gpu)
         if mem_used is not None and mem_total:
             pct = mem_used / mem_total * 100.0
-            self._set_nano_bar("Nano内存", pct, f"{mem_used:.1f}/{mem_total:.1f}G")
+            self.bar_nano_mem.set_value(pct)
+            self.lbl_nano_mem.setText(f"{mem_used:.1f}/{mem_total:.1f}G")
         if temp is not None:
-            self.lbl_nano_temp.setText(f"温度: {temp:.0f}°C")
+            self.chip_temp.set_value(f"{temp:.0f}°C")
             self.chart_temp.add_value(temp)
         if ms is not None:
-            self.lbl_nano_ms.setText(f"推理: {ms:.1f}ms")
+            self.chip_ms.set_value(f"{ms:.0f}ms")
             self.chart_ms.add_value(ms)
         self.lbl_nano_model.setText(f"模型: {model}" if model else "模型: --")
 
     def set_nano_online(self, online: bool):
         """Nano 连接状态切换（连接/断开）"""
+        self.dot_nano.set_online(online)
         if online:
-            self.lbl_nano_state.setText("● 在线")
+            self.lbl_nano_state.setText("在线")
             self.lbl_nano_state.setStyleSheet(
                 "color:#22c55e; font-size:14px; background:transparent;")
         else:
-            self.lbl_nano_state.setText("● 未连接")
+            self.lbl_nano_state.setText("未连接")
             self.lbl_nano_state.setStyleSheet(
                 "color:#ef4444; font-size:14px; background:transparent;")
-            for name, (bar, lbl) in self.nano_bars.items():
-                bar.setValue(0)
-                lbl.setText("--")
-            self.lbl_nano_temp.setText("温度: --")
-            self.lbl_nano_ms.setText("推理: --")
+            self.ring_gpu.set_offline()
+            self.bar_nano_mem.set_offline()
+            self.lbl_nano_mem.setText("--")
+            self.chip_temp.set_value("--")
+            self.chip_ms.set_value("--")
 
     # ================= 内部 =================
     def _match(self, ts, level, module, msg) -> bool:
@@ -476,49 +665,18 @@ class RunLogPage(QWidget):
     def _tick(self):
         self.lbl_time.setText(f"当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         up = int(time.time() - self._start)
-        self.lbl_uptime.setText(f"{up // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d}")
-        self.lbl_fps.setText(f"{self._fps:.0f} FPS")
+        self.chip_uptime.set_value(
+            f"{up // 3600:02d}:{up % 3600 // 60:02d}:{up % 60:02d}")
+        self.chip_fps.set_value(f"{self._fps:.0f} FPS")
         try:
             cpu = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory().percent
             disk = psutil.disk_usage("D:/")
-            self._set_bar("CPU", cpu)
-            self._set_bar("内存", mem)
-            self.lbl_disk.setText(f"{disk.free / (1024 ** 3):.0f} GB")
+            self.ring_cpu.set_value(cpu)
+            self.ring_mem.set_value(mem)
+            self.chip_disk.set_value(f"{disk.free / (1024 ** 3):.0f} GB")
         except Exception:
             pass
-
-    def _set_bar(self, name, pct):
-        bar, lbl = self.bars[name]
-        bar.setValue(int(pct))
-        lbl.setText(f"{int(pct)}%")
-        # 动态渐变颜色：低绿 / 中橙 / 高红
-        if pct < 60:
-            color = "#22c55e"
-        elif pct < 85:
-            color = "#f59e0b"
-        else:
-            color = "#ef4444"
-        bar.setStyleSheet(
-            f"QProgressBar{{background:#1e293b; border:none; border-radius:4px;}}"
-            f"QProgressBar::chunk{{background:qlineargradient("
-            f"x1:0,y1:0,x2:1,y2:0, stop:0 {color}, stop:1 #38bdf8); border-radius:4px;}}")
-
-    def _set_nano_bar(self, name, pct, text):
-        bar, lbl = self.nano_bars[name]
-        bar.setValue(int(pct))
-        lbl.setText(text)
-        # GPU/内存进度条动态颜色（与 PC 端一致）
-        if pct < 60:
-            color = "#22c55e"
-        elif pct < 85:
-            color = "#f59e0b"
-        else:
-            color = "#ef4444"
-        bar.setStyleSheet(
-            f"QProgressBar{{background:#1e293b; border:none; border-radius:4px;}}"
-            f"QProgressBar::chunk{{background:qlineargradient("
-            f"x1:0,y1:0,x2:1,y2:0, stop:0 {color}, stop:1 #38bdf8); border-radius:4px;}}")
 
     def _export(self):
         path, _ = QFileDialog.getSaveFileName(self, "导出日志", "run_log.csv",
