@@ -174,8 +174,9 @@ class RingGauge(QWidget):
         side = min(rect.width(), rect.height())
         sq = QRectF(0, 0, side, side)
         sq.moveCenter(rect.center())
-        thick = max(6.0, side * 0.10)
-        ring = sq.adjusted(thick * 0.8, thick * 0.8, -thick * 0.8, -thick * 0.8)
+        # 细线条圆环
+        thick = max(3.5, side * 0.055)
+        ring = sq.adjusted(thick, thick, -thick, -thick)
         c = self._color
 
         # 底环
@@ -186,10 +187,10 @@ class RingGauge(QWidget):
             frac = max(0.0, min(1.0, self._val.disp / self._maxv)) if self._maxv else 0
             span = int(frac * 360 * 16)
             start = 90 * 16
-            # 呼吸外发光（alpha 随 phase 微动）
-            glow_a = 40 + int(20 * (0.5 + 0.5 * math.sin(self._phase * 6.283)))
+            # 呼吸外发光（细、柔和）
+            glow_a = 30 + int(15 * (0.5 + 0.5 * math.sin(self._phase * 6.283)))
             p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), glow_a),
-                          thick * 2.1, Qt.SolidLine, Qt.RoundCap))
+                          thick * 1.9, Qt.SolidLine, Qt.RoundCap))
             p.drawArc(ring, start, -span)
             # 主渐变弧
             grad = QLinearGradient(ring.left(), ring.top(), ring.right(), ring.bottom())
@@ -198,17 +199,20 @@ class RingGauge(QWidget):
             p.setPen(QPen(grad, thick, Qt.SolidLine, Qt.RoundCap))
             p.drawArc(ring, start, -span)
 
-        # 中心数值
+        # 中心数值（上）与标题（下）分两层，避免重叠
         p.setPen(QColor("#f1f5f9") if not self._offline else QColor("#64748b"))
-        p.setFont(QFont("Microsoft YaHei", int(side * 0.20), QFont.Bold))
+        p.setFont(QFont("Microsoft YaHei", int(side * 0.19), QFont.Bold))
+        num_rect = QRectF(sq)
+        num_rect.translate(0, -side * 0.13)
         val_txt = "--" if self._offline else f"{self._val.disp:.0f}"
-        p.drawText(QRectF(sq).adjusted(0, -side * 0.08, 0, 0), Qt.AlignCenter, val_txt)
-        # 标题 + 单位
-        p.setFont(QFont("Microsoft YaHei", max(8, int(side * 0.09))))
+        p.drawText(num_rect, Qt.AlignCenter, val_txt)
+        # 标题 + 单位（下）
+        p.setFont(QFont("Microsoft YaHei", max(8, int(side * 0.085))))
         p.setPen(QColor("#94a3b8"))
+        title_rect = QRectF(sq)
+        title_rect.translate(0, side * 0.21)
         suffix = "" if self._offline else self._unit
-        p.drawText(QRectF(sq).adjusted(0, side * 0.16, 0, 0), Qt.AlignCenter,
-                   f"{self._title}{suffix}")
+        p.drawText(title_rect, Qt.AlignCenter, f"{self._title}{suffix}")
         p.end()
 
 
@@ -439,6 +443,7 @@ class RunLogPage(QWidget):
         col.addWidget(d)
 
         s = Card("系统状态")
+        s.body.setSpacing(12)
         # ---- 本机性能 ----
         head = QHBoxLayout()
         self.dot_local = PulseDot()
@@ -449,10 +454,12 @@ class RunLogPage(QWidget):
         s.body.addLayout(head)
 
         rings = QHBoxLayout()
-        rings.setSpacing(8)
+        rings.setSpacing(12)
         self.ring_cpu = RingGauge("CPU", "#22c55e")
         self.ring_mem = RingGauge("内存", "#38bdf8")
         self.chip_disk = StatChip("磁盘剩余", "#e2e8f0")
+        for w in (self.ring_cpu, self.ring_mem):
+            w.setMaximumHeight(120)
         rings.addWidget(self.ring_cpu, 1)
         rings.addWidget(self.ring_mem, 1)
         rings.addWidget(self.chip_disk, 1)
@@ -484,15 +491,18 @@ class RunLogPage(QWidget):
         s.body.addLayout(nhead)
 
         nrow = QHBoxLayout()
-        nrow.setSpacing(10)
+        nrow.setSpacing(14)
         self.ring_gpu = RingGauge("GPU", "#22d3ee")
+        self.ring_gpu.setMaximumHeight(120)
+        self.ring_gpu.set_offline(True)  # 未连接时显示 --
         nrow.addWidget(self.ring_gpu, 2)
         rightcol = QVBoxLayout()
-        rightcol.setSpacing(8)
+        rightcol.setSpacing(10)
         memrow = QHBoxLayout()
         memrow.setSpacing(6)
         memrow.addWidget(_lbl("Nano内存"))
         self.bar_nano_mem = GlowBar("#a78bfa")
+        self.bar_nano_mem.set_offline(True)
         memrow.addWidget(self.bar_nano_mem, 1)
         self.lbl_nano_mem = QLabel("--")
         self.lbl_nano_mem.setFixedWidth(70)
