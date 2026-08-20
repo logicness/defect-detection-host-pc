@@ -12,6 +12,11 @@ faulthandler.enable()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# ===== 数据隔离：测试不得写入生产 DB/配置/NG 图（见 isolate_test_data.py）=====
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import isolate_test_data as _iso  # noqa: E402
+_TMP = _iso.setup()
+
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 PASS = 0
@@ -30,6 +35,7 @@ def main():
     app = QApplication(sys.argv)
     from main import MainWindow
     win = MainWindow()
+    _iso.isolate_ng_saver(win)
     win.show()
     app.processEvents()
     check("主窗口 + 5 页构建", win.tab.count() == 5)

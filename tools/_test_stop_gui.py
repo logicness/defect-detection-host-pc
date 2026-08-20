@@ -19,6 +19,11 @@ IMAGE = r"D:/RK3568&Orin Nano/ORIN NANO/Model Training/_archive_20260811/dataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ===== 数据隔离：测试不得写入生产 DB/配置/NG 图 =====
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import isolate_test_data as _iso  # noqa: E402
+_TMP = _iso.setup()
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QImage
@@ -89,6 +94,7 @@ def run():
         app = QApplication(sys.argv)
         log("QApplication created")
         w = main.MainWindow()
+        _iso.isolate_ng_saver(w)
         log("MainWindow created")
         w.show()
         log(f"MainWindow shown, isVisible={w.isVisible()}")

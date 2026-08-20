@@ -8,6 +8,7 @@
 
 依赖：core.tcp_client.TCPClient（model_list_received / model_load_received）
 """
+import html
 import os
 import sys
 
@@ -16,9 +17,11 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QFileDialog, QMessageBox, QSplitter, QListWidget, QListWidgetItem,
     QFrame, QWidget, QApplication, QTabWidget, QProgressBar,
-    QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator
+    QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator,
+    QGraphicsDropShadowEffect
 )
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor
 
 from components.model_library import (
     score_quality, model_quality, load_library, save_library
@@ -125,6 +128,8 @@ class ModelManagerDialog(QDialog):
         splitter.setSizes([520, 720])
         root.addWidget(splitter, 1)
 
+        self._apply_visual_style()
+
         # 底部关闭按钮
         btns = QHBoxLayout()
         btns.addStretch()
@@ -139,6 +144,40 @@ class ModelManagerDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         btns.addWidget(btn_close)
         root.addLayout(btns)
+
+    def _apply_visual_style(self):
+        """高级视觉增强：阴影、渐变选中、悬浮高亮、圆角统一"""
+        # 左右面板阴影
+        for panel in (self.left_panel, self.right_panel):
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(28)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QColor(0, 0, 0, 110))
+            panel.setGraphicsEffect(shadow)
+
+        # 树/列表/搜索框统一高级样式
+        self.tree.setStyleSheet(
+            "QTreeWidget { font-size:15px; background:#0b1120; border:1px solid #1e293b;"
+            " border-radius:8px; padding:6px; }"
+            "QTreeWidget::item { padding:8px 6px; margin:1px 2px; border-radius:5px;"
+            " border-bottom:1px solid #1e293b; }"
+            "QTreeWidget::item:hover { background:#1e293b; }"
+            "QTreeWidget::item:selected { background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0, stop:0 #1d4ed8, stop:1 #1e293b);"
+            " color:#ffffff; border:1px solid #3b82f6; }"
+            "QTreeWidget::branch { background:transparent; }")
+        self.edit_search.setStyleSheet(
+            "QLineEdit { background:#0b1120; color:#e2e8f0; border:1px solid #334155;"
+            " border-radius:8px; padding:0 12px; font-size:14px; }"
+            "QLineEdit:focus { border:1px solid #3b82f6; background:#0f172a; }")
+        self.scan_list.setStyleSheet(
+            "QListWidget { font-size:14px; background:#0f172a; border:1px solid #1e293b;"
+            " border-radius:8px; padding:6px; }"
+            "QListWidget::item { padding:6px 4px; margin:1px 2px; border-radius:4px;"
+            " border-bottom:1px solid #1e293b; }"
+            "QListWidget::item:hover { background:#1e293b; }"
+            "QListWidget::item:selected { background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0, stop:0 #1d4ed8, stop:1 #1e293b); color:#ffffff; }")
 
     def _build_toolbar(self) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -422,7 +461,7 @@ class ModelManagerDialog(QDialog):
         search = self.edit_search.text().strip().lower() if hasattr(self, "edit_search") else ""
 
         # 本地模型库分组
-        local_root = QTreeWidgetItem(self.tree, ["本地库"])
+        local_root = QTreeWidgetItem(self.tree, ["PC 本地模型库"])
         local_root.setData(0, Qt.UserRole, "__group_local__")
         local_root.setFlags(local_root.flags() | Qt.ItemIsEnabled)
         local_items = []
@@ -438,7 +477,7 @@ class ModelManagerDialog(QDialog):
             self._add_tree_item(local_root, item)
 
         # 下位机模型分组
-        nano_root = QTreeWidgetItem(self.tree, ["下位机"])
+        nano_root = QTreeWidgetItem(self.tree, ["Nano 下位机"])
         nano_root.setData(0, Qt.UserRole, "__group_nano__")
         nano_root.setFlags(nano_root.flags() | Qt.ItemIsEnabled)
         for m in self._models:
@@ -460,7 +499,7 @@ class ModelManagerDialog(QDialog):
         # 更新提示
         total = len(local_items) + len(self._models)
         self.lbl_list_hint.setText(
-            f"共 {total} 个模型：本地 {len(local_items)}，下位机 {len(self._models)}。"
+            f"共 {total} 个模型：PC 本地 {len(local_items)}，Nano 下位机 {len(self._models)}。"
             "选中后在右侧操作。")
 
     def _refresh_scan_panel(self):
@@ -636,8 +675,9 @@ class ModelManagerDialog(QDialog):
             tags = model_tags(path)
             display_name = lib_item.get("display_name", "") if lib_item else ""
             name = display_name or os.path.basename(path)
-            self.detail_name.setText(name)
-            self.detail_source.setText("来源：本地 PC 模型")
+            # display_name/note 用户可编辑，转义防富文本注入
+            self.detail_name.setText(html.escape(str(name)))
+            self.detail_source.setText("来源：PC 本地")
             label, score, color, tip = score_quality(path)
             self.detail_quality.setText(f"质量：{label}")
             self.detail_quality.setStyleSheet(f"font-size:15px; font-weight:500; color:{color}; background:transparent;")
@@ -661,10 +701,10 @@ class ModelManagerDialog(QDialog):
             except Exception:
                 self.detail_size.setText("大小：--")
             note = lib_item.get("note", "") if lib_item else tip
-            self.detail_desc.setText(f"说明：{note}")
+            self.detail_desc.setText(f"说明：{html.escape(str(note))}")
             self.detail_path.setText(f"路径：{_shorten_path(path, 80)}")
             self.detail_path.setToolTip(path)
-            self.btn_load.setText("\u25b6  加载为本地推理模型")
+            self.btn_load.setText("\u25b6  加载为 PC 本地推理模型")
             in_lib = lib_item is not None
             self.btn_add_lib.setEnabled(not in_lib)
             self.btn_add_lib.setText("\u2713  已在模型库" if in_lib else "\u2606  添加到模型库")
@@ -675,7 +715,7 @@ class ModelManagerDialog(QDialog):
             name = _basename(name_full)
             tags = model_tags(name_full)
             self.detail_name.setText(name)
-            self.detail_source.setText("来源：下位机（Nano）")
+            self.detail_source.setText("来源：Nano 下位机")
             label, color, tip = model_quality(name_full)
             self.detail_quality.setText(f"质量：{label}")
             self.detail_quality.setStyleSheet(f"font-size:15px; font-weight:500; color:{color}; background:transparent;")
@@ -694,7 +734,7 @@ class ModelManagerDialog(QDialog):
             self.detail_desc.setText(f"说明：{tip}")
             self.detail_path.setText(f"路径：{_shorten_path(name_full, 80)}")
             self.detail_path.setToolTip(name_full)
-            self.btn_load.setText("\u25b6  切换为当前下位机模型")
+            self.btn_load.setText("\u25b6  切换为当前 Nano 下位机模型")
             self.btn_add_lib.setEnabled(False)
             self.btn_add_lib.setText("\u2606  添加到模型库")
             self.btn_edit_info.setEnabled(False)
@@ -724,16 +764,21 @@ class ModelManagerDialog(QDialog):
     def _set_score_color(self, score: int):
         if score >= 80:
             color = "#22c55e"
+            color2 = "#a3e635"
         elif score >= 60:
             color = "#eab308"
+            color2 = "#fbbf24"
         elif score > 0:
             color = "#ef4444"
+            color2 = "#fb923c"
         else:
             color = "#64748b"
+            color2 = "#94a3b8"
         self.detail_score.setStyleSheet(
-            f"QProgressBar {{ border:1px solid #334155; border-radius:4px; text-align:center; "
-            f"color:#f1f5f9; font-size:14px; background:#0b1120; height:22px; }}"
-            f"QProgressBar::chunk {{ border-radius:4px; background:{color}; }}")
+            f"QProgressBar {{ border:1px solid #334155; border-radius:6px; text-align:center; "
+            f"color:#f1f5f9; font-size:14px; background:#0b1120; height:24px; }}"
+            f"QProgressBar::chunk {{ border-radius:6px; background:qlineargradient("
+            f"x1:0,y1:0,x2:1,y2:0, stop:0 {color}, stop:1 {color2}); }}")
 
     # ---------- Nano 清单 ----------
     def refresh_nano_list(self):

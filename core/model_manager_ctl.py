@@ -36,6 +36,15 @@ class ModelManagerCtl(QObject):
         tcp_client.model_upload_received.connect(self._on_upload)
         tcp_client.model_status_received.connect(self._on_status)
         tcp_client.model_delete_received.connect(self._on_delete)
+        # 连接断开时强制复位上传/编译状态，避免状态永久卡死
+        tcp_client.disconnected.connect(self._reset_busy)
+
+    def _reset_busy(self):
+        """连接断开：上传/编译状态必须复位，否则 UI 永远显示「上传中/编译中」"""
+        if self.uploading or self.compiling:
+            self.uploading = False
+            self.compiling = False
+            self.error_message.emit("连接已断开，上传/编译状态已重置")
 
     @property
     def is_connected(self) -> bool:
@@ -60,6 +69,9 @@ class ModelManagerCtl(QObject):
         """上传本地模型到下位机（.onnx/.pt 自动编译）"""
         if not self.is_connected:
             self.error_message.emit("未连接下位机，无法上传模型")
+            return
+        if self.uploading:
+            self.error_message.emit("已有模型正在上传，请稍候")
             return
         self.uploading = True
         self._tcp.upload_model(path, progress_cb)

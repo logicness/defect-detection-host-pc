@@ -58,7 +58,11 @@ class _DBWriter(threading.Thread):
     def close(self):
         self._stop.set()
         try:
-            self._q.put(None)
+            # 队列满时不能阻塞 close（worker 可能已因 _stop 退出不再消费）
+            try:
+                self._q.put_nowait(None)
+            except queue.Full:
+                pass
         except Exception:
             pass
 
@@ -155,10 +159,25 @@ class AppController(QObject):
         class_names = resolve_class_names(self.nano_model_name)
         ui = []
         for det in result.get("detections", []):
-            box = det.get("box", [0, 0, 0, 0])
+            box = det.get("box", [0, 0, 0, 0]) or []
+            if not isinstance(box, (list, tuple)):
+                box = []
+            # 兜底：box 不足 4 项补 0，confidence 非数字归 0（防解包崩溃/脏数据进管线）
+            b = []
+            for v in box[:4]:
+                try:
+                    b.append(float(v))
+                except (TypeError, ValueError):
+                    b.append(0.0)
+            while len(b) < 4:
+                b.append(0.0)
+            try:
+                conf = float(det.get("confidence", 0) or 0)
+            except (TypeError, ValueError):
+                conf = 0.0
             cid = det.get("class_id", 0)
             cls = class_name_of(class_names, cid)
-            ui.append((cls, det.get("confidence", 0), *box[:4]))
+            ui.append((cls, conf, *b))
         self._process(ui, result.get("frame"), self.last_image_path)
 
     def _process(self, dets: list, frame, image_path: str):
@@ -177,6 +196,8 @@ class AppController(QObject):
 
         # 异步写库
         for det in dets:
+            if not isinstance(det, (list, tuple)) or len(det) < 6:
+                continue  # 脏记录跳过，不中断整帧管线
             x1, y1, x2, y2 = det[2:6]
             self._dbw.put("record", defect_type=det[0], confidence=det[1],
                           bbox=(x1, y1, x2, y2), area=abs((x2 - x1) * (y2 - y1)),

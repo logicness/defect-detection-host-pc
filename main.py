@@ -78,6 +78,14 @@ class MainWindow(QMainWindow):
         self._local_image_path = ""       # 图片路径
         self._local_image_active = False  # 是否正处于本地图片模式
         self._nano_active = False         # 是否检测到开发板通信（自动切换开发板模型）
+        # 多图批量检测状态
+        self._multi_image_paths = []      # 多次模式选中的图片列表
+        self._multi_image_idx = 0         # 当前浏览下标
+        self._multi_results = {}          # path -> {"dets": [...], "ms": float}
+        self._batch_running = False
+        self._batch_queue = []            # 待检测图片路径
+        self._current_batch_path = ""     # 当前正在检测的图片
+        self._nano_local_pending = ""     # 正在等待 Nano 本地图片结果的路径
         # 从配置恢复上次本地模型（必须是存在的 .onnx/.pt 模型文件）
         self._local_model = self.cfg.get("state", {}).get("last_local_model", "")
         if self._local_model and not (
@@ -292,14 +300,19 @@ class MainWindow(QMainWindow):
         # 新一次检测开始时，允许接收推理结果
         self._detection_paused = False
 
-        # 已加载本地图片 → 单帧推理（优先级最高，避免被实时流状态拦截）
+        # 已加载本地图片 → 推理（单次/多次）
         if self._local_image is not None:
-            # 如果实时流还在跑，先停止再继续本地推理
             if self.stream_engine.is_running:
                 self._on_stop()
             self._local_image_active = True
-            # 关键：推理期间必须启用「停止检测」按钮，否则用户无法停止/清框
             self.page_realtime.set_running(True)
+
+            # 多次模式 + 多张图片 → 批量检测
+            multi = self.page_realtime.get_detect_mode() == "多次检测"
+            if multi and len(self._multi_image_paths) > 1:
+                self._start_batch()
+                return
+            # 单次模式 或 多次模式只有一张 → 单张检测
             self._detect_local_image()
             return
 
@@ -316,8 +329,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "开始检测",
                 "当前没有可用的检测输入源，无法开始检测。\n\n"
-                "请先点击「本地图片」选择一张图片进行单张检测。\n\n"
-                "（实时相机检测需接入相机后才可用，当前无相机输入）")
+                "请先点击「本地图片」选择图片进行检测。")
 
     @staticmethod
     def _is_torchscript_model(path: str) -> bool:
@@ -336,16 +348,38 @@ class MainWindow(QMainWindow):
             return False
 
     def _detect_local_image(self):
-        """对本地图片做单帧推理：必须有有效的 .onnx/.pt 本地模型，否则弹窗提示。
+        """对本地图片做单帧推理（单张/多次只有一张时）。
 
-        推理走 core.local_infer.LocalInferEngine 后台线程（对齐 Nano 项目的
-        「模型管理 → 本地检测」逻辑：异步执行、信号回传、不阻塞 UI）。
+        推理源下拉选择「Nano 下位机模型」→ 走 TCP 下发位机推理（与批量一致）；
+        否则走 PC 本地推理 core.local_infer.LocalInferEngine 后台线程
+        （异步执行、信号回传、不阻塞 UI）。
         """
         # 确保不跟实时流同时跑
         if self.stream_engine.is_running:
             self.stream_engine.stop()
         path = self._local_image_path
         basename = os.path.basename(path)
+
+        # ⭐ 推理源 = Nano 下位机 → 单张也走下位机推理（对齐批量逻辑）
+        source = self.page_realtime.get_infer_source()
+        if "Nano" in source:
+            if not self.controller.tcp.is_connected:
+                self.controller.log_message.emit(
+                    "WARN", "检测", "推理源为 Nano 下位机但未连接，请先连接下位机")
+                self.status_left.setText(f"本地图片: {basename}　| Nano 未连接")
+                return
+            self._nano_local_pending = path
+            self.status_left.setText(f"本地图片: {basename}　| Nano 推理中...")
+            self.controller.log_message.emit(
+                "INFO", "检测", f"开始 Nano 下位机推理: {basename}")
+            ok, buf = cv2.imencode(".jpg", self._local_image)
+            if ok:
+                self.controller.send_image(buf.tobytes(), path)
+            else:
+                self._nano_local_pending = ""
+                self.controller.log_message.emit(
+                    "ERROR", "检测", f"图片编码失败: {basename}")
+            return
 
         # 没有本地模型
         if not self._local_model:
@@ -447,12 +481,17 @@ class MainWindow(QMainWindow):
             return
 
         self.controller.ingest_result(dets, self._local_image, path)
+        self._multi_results[path] = {"dets": list(dets), "ms": ms}
         self.controller.log_message.emit(
             "INFO", "检测",
             f"本地图片检测完成: {basename} "
             f"({'NG 缺陷×' + str(len(dets)) if dets else 'OK'})  耗时 {ms:.0f} ms")
         self.status_left.setText(
             f"本地图片: {basename}　| 检测完成 {ms:.0f} ms")
+        if self._batch_running:
+            self.page_realtime.update_batch_progress(
+                len(self._multi_results), len(self._multi_image_paths))
+            self._batch_next()
 
     def _on_local_infer_error(self, msg: str):
         """本地推理失败（后台线程回传）"""
@@ -603,6 +642,20 @@ class MainWindow(QMainWindow):
         else:
             self.controller.log_message.emit("INFO", "检测", "检测通过")
 
+        # Nano 本地图片检测结果：存结果并继续下一张（批量）或更新状态（单张）
+        if self._nano_local_pending:
+            path = self._nano_local_pending
+            self._nano_local_pending = ""
+            ms = 0
+            self._multi_results[path] = {"dets": list(dets), "ms": ms}
+            if self._batch_running:
+                self.page_realtime.update_batch_progress(
+                    len(self._multi_results), len(self._multi_image_paths))
+                self._batch_next()
+            else:
+                self.status_left.setText(
+                    f"本地图片: {os.path.basename(path)}　| Nano 检测完成")
+
     def _on_ng_alarm(self, count):
         self.controller.log_message.emit(
             "ERROR", "检测", f"连续 {count} 次检出缺陷，请检查产线状态！")
@@ -616,7 +669,7 @@ class MainWindow(QMainWindow):
                    f"{st['pass']/st['total']*100:.1f}%\n"
                    f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             if get_pusher().push(msg):
-                self.controller.log_message.emit("INFO", "告警", "微信告警已推送")
+                self.controller.log_message.emit("INFO", "告警", "微信告警推送已受理（后台发送中）")
         except Exception as e:
             self.controller.log_message.emit("WARN", "告警", f"微信告警失败: {e}")
         if QApplication.platformName() == "offscreen":
@@ -818,6 +871,7 @@ class MainWindow(QMainWindow):
             self._status_timer.timeout.connect(self._poll_nano_status)
         self._status_timer.start()
         self._poll_nano_status()
+        self.page_log.set_nano_online(True)
         # 连接成功弹窗（10 秒内不重复，避免自动重连风暴频繁弹窗）
         now = time.time()
         if now - getattr(self, "_last_conn_popup_ts", 0) >= 10:
@@ -847,6 +901,7 @@ class MainWindow(QMainWindow):
         # 停止 Nano 状态轮询
         if getattr(self, "_status_timer", None):
             self._status_timer.stop()
+        self.page_log.set_nano_online(False)
 
     # ---------------- Nano 状态轮询 ----------------
     def _poll_nano_status(self):
@@ -874,6 +929,7 @@ class MainWindow(QMainWindow):
             model = status.get("model")
             suffix = f" | Nano: {model}" if model else ""
             self.status_left.setText(" | ".join(parts) + suffix)
+            self.page_log.update_nano_status(status)
         except Exception as e:
             self._log_tcp_debug("WARN", f"状态显示异常: {e}")
 
@@ -1072,33 +1128,61 @@ class MainWindow(QMainWindow):
             + self.title_bar.pos()
 
     def _on_local_image(self):
-        """本地图片：选图后直接显示在实时预览区，不弹窗。
-        点「开始检测」时对这张图做单帧推理。
-        若取消选择且当前处于本地图片模式，则切回实时流模式。"""
+        """本地图片：单次模式选一张，多次模式可选多张。
+        选好后直接显示在实时预览区，不弹窗。"""
         last_dir = self.cfg.get("state", {}).get("last_image_dir", "")
-        # 优先跟随当前模型的训练数据集图片目录
         start_dir = ""
         if self._local_model:
             from components.model_info import resolve_dataset_image_dir
             start_dir = resolve_dataset_image_dir(self._local_model)
         if not start_dir:
             start_dir = last_dir
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择检测图片", start_dir,
-            "图片文件 (*.png *.jpg *.jpeg *.bmp)")
-        if not path:
-            # 取消选择：如果当前是本地图片模式，则清除并切回实时流模式
-            if self._local_image_active:
-                self._local_image = None
-                self._local_image_path = ""
-                self._local_image_active = False
-                self.status_left.setText("就绪　|　检测帧率: -- FPS")
-                self.controller.log_message.emit(
-                    "INFO", "检测", "已清除本地图片，切换为实时流模式")
-            return
-        # 记忆目录
-        self._save_state(last_image_dir=os.path.dirname(path) or "")
-        # cv2.imread 不支持中文路径，用 np.fromfile + imdecode 替代
+
+        multi = self.page_realtime.get_detect_mode() == "多次检测"
+        if multi:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "选择检测图片（可多选）", start_dir,
+                "图片文件 (*.png *.jpg *.jpeg *.bmp)")
+            if not paths:
+                return
+            self._multi_image_paths = paths
+            self._multi_image_idx = 0
+            self._multi_results.clear()
+            self._save_state(last_image_dir=os.path.dirname(paths[0]) or "")
+            self._on_stop()
+            self._local_image_active = True
+            self._load_image_file(paths[0])
+            self.page_realtime.update_nav(0, len(paths))
+            source = self.page_realtime.get_infer_source()
+            self.page_realtime.set_source(
+                f"{'Nano 下位机' if 'Nano' in source else 'PC 本地'}（多图 {len(paths)} 张）", "#22d3ee")
+            self.controller.log_message.emit("INFO", "检测", f"已选择 {len(paths)} 张图片，点击「开始检测」批量检测")
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择检测图片", start_dir,
+                "图片文件 (*.png *.jpg *.jpeg *.bmp)")
+            if not path:
+                if self._local_image_active:
+                    self._local_image = None
+                    self._local_image_path = ""
+                    self._local_image_active = False
+                    self.page_realtime.set_source("--", "#94a3b8")
+                    self.status_left.setText("就绪　|　检测帧率: -- FPS")
+                return
+            self._multi_image_paths = [path]
+            self._multi_image_idx = 0
+            self._multi_results.clear()
+            self._save_state(last_image_dir=os.path.dirname(path) or "")
+            self._on_stop()
+            self._local_image_active = True
+            self._load_image_file(path)
+            source = self.page_realtime.get_infer_source()
+            self.page_realtime.set_source(
+                f"{'Nano 下位机' if 'Nano' in source else 'PC 本地'}（单图）", "#22d3ee")
+            self.controller.log_message.emit("INFO", "检测", f"已加载本地图片: {os.path.basename(path)}")
+
+    def _load_image_file(self, path: str):
+        """加载图片文件到预览区（单图/多图共用）"""
         import numpy as np
         try:
             _raw = np.fromfile(path, dtype=np.uint8)
@@ -1107,30 +1191,152 @@ class MainWindow(QMainWindow):
             _img = None
         if _img is None:
             self.controller.log_message.emit("ERROR", "检测", f"无法读取图片: {path}")
-            if QApplication.platformName() != "offscreen":
-                QMessageBox.warning(self, "本地图片", f"无法读取图片:\n{path}")
             return
-
-        # 停止实时流（如果在运行），本地图片只做单帧
         self._on_stop()
-
-        # 设置本地图片模式
         self._local_image = _img
         self._local_image_path = path
         self._local_image_active = True
-
-        # 直接显示在预览区
         rgb = cv2.cvtColor(_img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         self.page_realtime.update_image(
             QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
-        self.page_realtime.update_detections([])  # 清除之前的检测框
-
+        self.page_realtime.update_detections([])
         basename = os.path.basename(path)
-        self.controller.log_message.emit(
-            "INFO", "检测",
-            f"已加载本地图片: {basename}（点击「开始检测」进行推理）")
         self.status_left.setText(f"本地图片: {basename}　|　点击开始检测")
+
+    def _start_batch(self):
+        """启动批量检测：依次检测所有未检测的图片"""
+        self._batch_running = True
+        self._batch_queue = [p for p in self._multi_image_paths if p not in self._multi_results]
+        total = len(self._multi_image_paths)
+        done = len(self._multi_results)
+        self.page_realtime.update_batch_progress(done, total)
+        if not self._batch_queue:
+            self._finish_batch()
+            return
+        self.controller.log_message.emit("INFO", "检测", f"开始批量检测 {len(self._batch_queue)} 张图片")
+        self._batch_next()
+
+    def _batch_next(self):
+        """检测队列中下一张图片"""
+        if not self._batch_queue:
+            self._finish_batch()
+            return
+        path = self._batch_queue.pop(0)
+        self._current_batch_path = path
+        if path in self._multi_image_paths:
+            self._multi_image_idx = self._multi_image_paths.index(path)
+        self._load_image_file(path)
+        # ⚠️ 关键：_load_image_file 内部调了 _on_stop() 会设 _detection_paused=True，
+        # 必须在这里重置为 False，否则推理结果回来时会被忽略，批量检测卡住
+        self._detection_paused = False
+        self.page_realtime.update_nav(self._multi_image_idx, len(self._multi_image_paths))
+        self.page_realtime.set_running(True)
+        self.page_realtime.update_batch_progress(
+            len(self._multi_results), len(self._multi_image_paths))
+
+        source = self.page_realtime.get_infer_source()
+        if "Nano" in source and self.controller.tcp.is_connected:
+            # Nano 下位机推理
+            self._nano_local_pending = path
+            self.status_left.setText(f"批量检测 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}] 推理中...")
+            ok, buf = cv2.imencode(".jpg", self._local_image)
+            if ok:
+                self.controller.send_image(buf.tobytes(), path)
+            else:
+                self._multi_results[path] = {"dets": [], "ms": 0}
+                self._batch_next()
+        else:
+            # PC 本地推理：如果模型无效会直接 return，需要检测是否真的启动了
+            self._detect_local_image()
+            # 如果推理引擎没有在忙，说明检测没启动（模型无效等），跳过这张
+            eng = getattr(self, "_local_infer_engine", None)
+            if eng is None or not eng.busy:
+                # 如果是 Nano 模式但未连接，也跳过
+                if "Nano" in source and not self.controller.tcp.is_connected:
+                    self.controller.log_message.emit(
+                        "WARN", "检测", "Nano 未连接，跳过此图片")
+                self._multi_results[path] = {"dets": [], "ms": 0}
+                self._batch_next()
+
+    def _finish_batch(self):
+        """批量检测完成：回到第一张，显示结果"""
+        self._batch_running = False
+        self._batch_queue = []
+        self.page_realtime.set_running(False)
+        done = len(self._multi_results)
+        total = len(self._multi_image_paths)
+        self.page_realtime.update_batch_progress(done, total)
+        self.controller.log_message.emit("INFO", "检测", f"批量检测完成 {done}/{total} 张")
+        if self._multi_image_paths:
+            self._multi_image_idx = 0
+            self._show_multi_image(0)
+        self.status_left.setText(f"批量检测完成 {done}/{total} 张　|　显示第一张结果")
+
+    def _show_multi_image(self, idx: int):
+        """加载多图列表中的第 idx 张并显示检测结果（不清框、不触发停止）"""
+        paths = self._multi_image_paths
+        if idx < 0 or idx >= len(paths):
+            return
+        path = paths[idx]
+        self._multi_image_idx = idx
+        # 直接加载图片显示，不调 _load_image_file（它会触发 _on_stop 清框）
+        import numpy as np
+        try:
+            _raw = np.fromfile(path, dtype=np.uint8)
+            _img = cv2.imdecode(_raw, cv2.IMREAD_COLOR)
+        except Exception:
+            _img = None
+        if _img is None:
+            self.controller.log_message.emit("ERROR", "检测", f"无法读取图片: {path}")
+            return
+        self._local_image = _img
+        self._local_image_path = path
+        self._local_image_active = True
+        # 显示原图
+        rgb = cv2.cvtColor(_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        self.page_realtime.update_image(
+            QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+        # 如果已有检测结果，显示框
+        if path in self._multi_results:
+            r = self._multi_results[path]
+            dets = r.get("dets", [])
+            self.page_realtime.update_detections(dets)
+            self.page_realtime.update_detail(
+                "Product_A_v1", "NG" if dets else "OK",
+                (dets[0][0] if dets else "-"),
+                int(abs((dets[0][4]-dets[0][2])*(dets[0][5]-dets[0][3]))) if dets else 0,
+                f"{dets[0][1]:.2f}" if dets else "--",
+                time.strftime("%Y-%m-%d %H:%M:%S"), path)
+            ms = r.get("ms", 0)
+            self.status_left.setText(f"多图检测 [{idx+1}/{len(paths)}] {os.path.basename(path)}　| {ms:.0f}ms")
+        else:
+            self.page_realtime.update_detections([])
+            self.status_left.setText(f"多图检测 [{idx+1}/{len(paths)}] {os.path.basename(path)}　| 未检测")
+        self.page_realtime.update_nav(idx, len(paths))
+
+    def _on_batch_detect(self):
+        """实时页「批量检测」：打开多图检测对话框，支持 PC 本地 / Nano 下位机"""
+        from components.local_image_detect import LocalImageDetectDialog
+        dlg = LocalImageDetectDialog(
+            local_model=self._local_model,
+            rois=[{"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
+                  for r in self._rois if r.get("enabled", True)],
+            parent=self,
+            default_image_dir=self.cfg.get("state", {}).get("last_image_dir", ""),
+            tcp_client=self.controller.tcp,
+        )
+        dlg.result_committed.connect(self._on_batch_result)
+        dlg.exec_()
+
+    def _on_batch_result(self, data: dict):
+        """批量检测结果回传：进入主流程（KPI / 历史 / 数据库）"""
+        try:
+            self.controller.ingest_result(
+                data.get("dets", []), data.get("frame"), data.get("image_path", ""))
+        except Exception as e:
+            self._log_tcp_debug("WARN", f"批量检测结果入库失败: {e}")
 
     def closeEvent(self, event):
         try:

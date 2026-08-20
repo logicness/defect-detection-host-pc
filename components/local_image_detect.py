@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QMessageBox, QComboBox, QWidget, QApplication
 )
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal, Qt, QTimer
 from PyQt5.QtGui import QImage
 
 from components.image_preview import ImagePreview
@@ -49,6 +49,17 @@ class LocalImageDetectDialog(QDialog):
         self._last_ms = 0.0
         self._infer = None          # LocalInferEngine（有模型时）
         self._nano_pending = False  # 是否正在等 Nano 结果
+        # 多图批量检测
+        self._image_paths = []      # 已选图片列表
+        self._image_idx = 0         # 当前浏览下标
+        self._results = {}          # path -> {"dets": [...], "ms": float}
+        self._batch_running = False
+        self._batch_queue = []      # 待批量检测的图片路径
+        self._current_infer_path = ""
+        self._current_nano_path = ""
+        self._nano_timeout_timer = QTimer(self)   # Nano 推理超时（防批量卡死）
+        self._nano_timeout_timer.setSingleShot(True)
+        self._nano_timeout_timer.timeout.connect(self._on_nano_timeout)
 
         self.setWindowTitle("本地图片检测")
         self.setMinimumSize(800, 680)
@@ -57,6 +68,9 @@ class LocalImageDetectDialog(QDialog):
         self._populate_model_combo()
         self._set_model(self._model)
         if initial_image:
+            self._image_paths = [initial_image]
+            self._image_idx = 0
+            self._update_nav()
             self._load_image(initial_image)
             if hasattr(self.parent(), '_save_state') and callable(self.parent()._save_state):
                 self.parent()._save_state(last_image_dir=os.path.dirname(initial_image) or "")
@@ -99,28 +113,54 @@ class LocalImageDetectDialog(QDialog):
 
         # 顶部操作行
         top = QHBoxLayout()
-        self.btn_pick = QPushButton("选择图片...")
+        self.btn_pick = QPushButton("选择多张图片...")
         self.btn_pick.setObjectName("btnPrimary")
         self.btn_pick.clicked.connect(self._on_pick)
         self.btn_detect = QPushButton("开始检测")
         self.btn_detect.setFixedHeight(40)
         self.btn_detect.setEnabled(False)
         self.btn_detect.clicked.connect(self._on_detect)
+        self.btn_batch = QPushButton("⚡ 批量检测")
+        self.btn_batch.setFixedHeight(40)
+        self.btn_batch.setEnabled(False)
+        self.btn_batch.setToolTip("对已选全部图片依次检测，完成后可上一张/下一张查看结果")
+        self.btn_batch.clicked.connect(self._on_batch)
         self.btn_save = QPushButton("保存标注图")
         self.btn_save.setFixedHeight(40)
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self._on_save)
         top.addWidget(self.btn_pick)
         top.addWidget(self.btn_detect)
+        top.addWidget(self.btn_batch)
         top.addWidget(self.btn_save)
         top.addStretch()
         self.light_model = StatusLight("未加载模型")
         top.addWidget(self.light_model)
         body_layout.addLayout(top)
 
+        # 多图导航行
+        nav = QHBoxLayout()
+        self.btn_prev = QPushButton("◀ 上一张")
+        self.btn_prev.setFixedHeight(32)
+        self.btn_prev.setEnabled(False)
+        self.btn_prev.clicked.connect(self._go_prev)
+        self.lbl_index = QLabel("0/0")
+        self.lbl_index.setAlignment(Qt.AlignCenter)
+        self.lbl_index.setStyleSheet(
+            "color:#94a3b8; font-size:15px; background:transparent;")
+        self.btn_next = QPushButton("下一张 ▶")
+        self.btn_next.setFixedHeight(32)
+        self.btn_next.setEnabled(False)
+        self.btn_next.clicked.connect(self._go_next)
+        nav.addWidget(self.btn_prev)
+        nav.addWidget(self.lbl_index, 1)
+        nav.addWidget(self.btn_next)
+        nav.addStretch()
+        body_layout.addLayout(nav)
+
         # 模型选择行
         mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("检测模型:"))
+        mrow.addWidget(QLabel("检测模型/来源:"))
         self.combo_model = FocusComboBox()
         self.combo_model.setMinimumHeight(36)
         self.combo_model.setMinimumWidth(360)
@@ -176,18 +216,18 @@ class LocalImageDetectDialog(QDialog):
         self.combo_model.clear()
         # 条目格式：(显示文本, 模型路径 或 特殊标记)
         # 不再提供「模拟演示」选项；无模型时选择框第一项为提示项
-        entries = [("请先选择本地模型", "")]
+        entries = [("请选择检测模型", "")]
         if self._tcp and getattr(self._tcp, "is_connected", False):
-            entries.append(("Nano 推理（下位机）", _NANO_TAG))
+            entries.append(("【Nano 下位机】当前模型（TCP 推理）", _NANO_TAG))
         if self._model and os.path.isfile(self._model):
-            entries.append((f"当前模型: {os.path.basename(self._model)}",
+            entries.append((f"【PC 本地】当前模型: {os.path.basename(self._model)}",
                             self._model))
         for e in mlib.load_library():
             path = e.get("path", "")
             if path and os.path.isfile(path) and path not in [p for _, p in entries]:
                 q_label, _ = mlib.infer_quality_from_path(path)
-                entries.append((f"[{q_label}] {os.path.basename(path)}", path))
-        entries.append(("——— 浏览模型文件... ———", _BROWSE_TAG))
+                entries.append((f"【PC 本地】[{q_label}] {os.path.basename(path)}", path))
+        entries.append(("【PC 本地】浏览 .onnx/.pt 文件...", _BROWSE_TAG))
         for text, data in entries:
             self.combo_model.addItem(text, data)
         self.combo_model.blockSignals(False)
@@ -243,7 +283,7 @@ class LocalImageDetectDialog(QDialog):
             if self._tcp is not None and getattr(self._tcp, "is_connected", False):
                 self._tcp.result_received.connect(self._on_nano_result)
                 self._nano_connected = True
-                self.light_model.set_status(1, "Nano 推理模式")
+                self.light_model.set_status(1, "Nano 下位机推理")
             else:
                 self.light_model.set_status(2, "Nano 未连接，请先连接或选择本地模型")
                 self._model = ""
@@ -256,7 +296,7 @@ class LocalImageDetectDialog(QDialog):
                 self._infer.result_ready.connect(self._on_infer_result)
                 self._infer.error_ready.connect(self._on_infer_error)
                 self.light_model.set_status(
-                    1, f"模型: {os.path.basename(self._model)}")
+                    1, f"PC 本地模型: {os.path.basename(self._model)}")
             except Exception as e:
                 self._infer = None
                 self.light_model.set_status(
@@ -276,17 +316,22 @@ class LocalImageDetectDialog(QDialog):
             resolved = resolve_dataset_image_dir(self._model)
             if resolved:
                 start_dir = resolved
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择检测图片", start_dir,
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择检测图片（可多选）", start_dir,
             "图片文件 (*.png *.jpg *.jpeg *.bmp)")
-        if path:
-            self._load_image(path)
+        if paths:
+            self._image_paths = paths
+            self._image_idx = 0
+            self._results.clear()
+            self._update_nav()
+            self._load_image(paths[0])
+            self.btn_batch.setEnabled(True)
             # 通知调用方记忆目录
             if hasattr(self.parent(), '_save_state') and callable(self.parent()._save_state):
-                self.parent()._save_state(last_image_dir=os.path.dirname(path) or "")
+                self.parent()._save_state(last_image_dir=os.path.dirname(paths[0]) or "")
 
-    def _load_image(self, path: str):
-        """加载图片并重置检测状态（入口自动加载时也会调用）"""
+    def _load_image(self, path: str, keep_result: bool = False):
+        """加载图片并重置检测状态；keep_result=True 时显示已保存的检测结果"""
         # cv2.imread 不支持中文路径，用 np.fromfile + imdecode 替代
         import numpy as np
         try:
@@ -305,11 +350,42 @@ class LocalImageDetectDialog(QDialog):
         self.preview.clear_detections()
         self.btn_detect.setEnabled(True)
         self.btn_save.setEnabled(False)
-        self.lbl_result.setText(f"结果: 已加载 {os.path.basename(path)}")
-        self.lbl_defect.setText("缺陷: --")
-        self.lbl_conf.setText("置信度: --")
-        self.lbl_time.setText("耗时: --")
+        if keep_result and path in self._results:
+            r = self._results[path]
+            self._dets = r["dets"]
+            self._last_ms = r.get("ms", 0)
+            self._show_result(self._dets, commit=False)
+        else:
+            self.lbl_result.setText(f"结果: 已加载 {os.path.basename(path)}")
+            self.lbl_defect.setText("缺陷: --")
+            self.lbl_conf.setText("置信度: --")
+            self.lbl_time.setText("耗时: --")
         return True
+
+    # ---------------- 多图导航 ----------------
+    def _update_nav(self):
+        total = len(self._image_paths)
+        cur = self._image_idx + 1 if total else 0
+        self.lbl_index.setText(f"{cur}/{total}")
+        self.btn_prev.setEnabled(total > 0 and self._image_idx > 0)
+        self.btn_next.setEnabled(total > 0 and self._image_idx < total - 1)
+        self.btn_batch.setEnabled(total > 0 and not self._batch_running)
+
+    def _go_prev(self):
+        if self._batch_running:
+            return
+        if self._image_idx > 0:
+            self._image_idx -= 1
+            self._load_image(self._image_paths[self._image_idx], keep_result=True)
+            self._update_nav()
+
+    def _go_next(self):
+        if self._batch_running:
+            return
+        if self._image_idx < len(self._image_paths) - 1:
+            self._image_idx += 1
+            self._load_image(self._image_paths[self._image_idx], keep_result=True)
+            self._update_nav()
 
     def _show_frame(self):
         rgb = cv2.cvtColor(self._frame, cv2.COLOR_BGR2RGB)
@@ -317,6 +393,76 @@ class LocalImageDetectDialog(QDialog):
         self.preview.set_image(
             QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
         self.preview.set_rois(self._rois)
+
+    # ---------------- 批量检测 ----------------
+    def _on_batch(self):
+        if not self._image_paths:
+            QMessageBox.information(
+                self, "批量检测", "请先选择多张图片，再点击「批量检测」。")
+            return
+        if self._model == _NANO_TAG and (self._tcp is None or not self._tcp.is_connected):
+            QMessageBox.warning(
+                self, "批量检测", "Nano 下位机未连接，无法批量检测。\n请先连接 Nano，或切换为 PC 本地模型。")
+            return
+        if self._model != _NANO_TAG and self._infer is None:
+            QMessageBox.warning(
+                self, "批量检测", "当前未选择可用模型。\n请选择 PC 本地模型或 Nano 下位机模式。")
+            return
+
+        self._batch_running = True
+        # 只检测还没有结果的图片；如果全部已检测，直接完成
+        self._batch_queue = [p for p in self._image_paths if p not in self._results]
+        if not self._batch_queue:
+            self._finish_batch()
+            return
+        self.btn_batch.setEnabled(False)
+        self.btn_detect.setEnabled(False)
+        self.btn_pick.setEnabled(False)
+        self.btn_prev.setEnabled(False)
+        self.btn_next.setEnabled(False)
+        self.lbl_result.setText("结果: 批量检测中 0/%d..." % len(self._image_paths))
+        self._batch_next()
+
+    def _batch_next(self):
+        if not self._batch_queue:
+            self._finish_batch()
+            return
+        path = self._batch_queue.pop(0)
+        if path in self._image_paths:
+            self._image_idx = self._image_paths.index(path)
+            self._update_nav()
+        self._load_image(path, keep_result=False)
+        if self._model == _NANO_TAG:
+            self._current_nano_path = path
+            self._nano_pending = True
+            self.lbl_result.setText("结果: Nano 批量推理中...")
+            ok, buf = cv2.imencode(".jpg", self._frame)
+            if ok:
+                self._nano_timeout_timer.start(15000)  # 15s 无响应判超时，继续下一张
+                self._tcp.send_image(buf.tobytes())
+            else:
+                self._nano_timeout_timer.stop()
+                self._results[path] = {"dets": [], "ms": 0, "error": "编码失败"}
+                self._batch_next()
+        else:
+            self._current_infer_path = path
+            self.lbl_result.setText("结果: PC 本地批量推理中...")
+            self._infer.detect(path, self._model)
+
+    def _finish_batch(self):
+        self._batch_running = False
+        self._batch_queue = []
+        self.btn_batch.setEnabled(True)
+        self.btn_detect.setEnabled(True)
+        self.btn_pick.setEnabled(True)
+        self._update_nav()
+        if self._image_paths:
+            self._image_idx = 0
+            self._load_image(self._image_paths[0], keep_result=True)
+            self._update_nav()
+        done = len(self._results)
+        total = len(self._image_paths)
+        self.lbl_result.setText(f"结果: 批量检测完成 {done}/{total} 张")
 
     # ---------------- 检测 ----------------
     def _on_detect(self):
@@ -329,8 +475,9 @@ class LocalImageDetectDialog(QDialog):
             return
         if self._model == _NANO_TAG and self._tcp is not None and self._tcp.is_connected:
             # Nano 推理：发送图片到下位机，结果异步回传
+            self._current_nano_path = self._img_path
             self._nano_pending = True
-            self.lbl_result.setText("结果: Nano 推理中...")
+            self.lbl_result.setText("结果: Nano 下位机推理中...")
             self.lbl_time.setText("耗时: --")
             self.btn_detect.setEnabled(False)
             ok, buf = cv2.imencode(".jpg", self._frame)
@@ -343,7 +490,8 @@ class LocalImageDetectDialog(QDialog):
             return
         if self._infer is not None:
             # 真实本地推理（异步）
-            self.lbl_result.setText("结果: 推理中...")
+            self._current_infer_path = self._img_path
+            self.lbl_result.setText("结果: PC 本地推理中...")
             self.lbl_time.setText("耗时: --")
             self.btn_detect.setEnabled(False)
             self._infer.detect(self._img_path, self._model)
@@ -358,6 +506,7 @@ class LocalImageDetectDialog(QDialog):
 
     def _on_infer_result(self, result: dict):
         self.btn_detect.setEnabled(True)
+        path = self._current_infer_path or self._img_path
         raw = result.get("detections", [])
         from core.class_names import resolve_class_names, class_name_of
         class_names = resolve_class_names(self._model)
@@ -368,19 +517,51 @@ class LocalImageDetectDialog(QDialog):
             cls = class_name_of(class_names, cid)
             dets.append((cls, d.get("confidence", 0), *box[:4]))
         self._last_ms = result.get("timing", {}).get("total_ms", 0)
-        self._show_result(dets)
+        self._results[path] = {"dets": list(dets), "ms": self._last_ms}
+        if self._batch_running:
+            self.lbl_result.setText(
+                f"结果: 批量检测中 {len(self._results)}/{len(self._image_paths)}...")
+            self._show_result(dets)
+            self._batch_next()
+        else:
+            self._show_result(dets)
 
     def _on_infer_error(self, msg: str):
         self.btn_detect.setEnabled(True)
-        self.lbl_result.setText("结果: 推理失败")
-        QMessageBox.warning(self, "本地图片检测", f"本地推理失败: {msg}")
+        if self._batch_running:
+            path = self._current_infer_path or self._img_path
+            self._results[path] = {"dets": [], "ms": 0, "error": msg}
+            self.lbl_result.setText(
+                f"结果: 批量检测中 {len(self._results)}/{len(self._image_paths)}...")
+            self._batch_next()
+        else:
+            self.lbl_result.setText("结果: 推理失败")
+            QMessageBox.warning(self, "本地图片检测", f"本地推理失败: {msg}")
+
+    def _on_nano_timeout(self):
+        """Nano 推理超时：判该张失败，继续批量/恢复按钮（防永久卡死）"""
+        if not self._nano_pending:
+            return
+        self._nano_pending = False
+        path = self._current_nano_path or self._img_path
+        self._results[path] = {"dets": [], "ms": 0, "error": "Nano 推理超时"}
+        if self._batch_running:
+            self.lbl_result.setText(
+                f"结果: 批量检测中 {len(self._results)}/{len(self._image_paths)}...")
+            self._batch_next()
+        else:
+            self.btn_detect.setEnabled(True)
+            self.lbl_result.setText("结果: Nano 推理超时")
+            self.lbl_time.setText("耗时: --")
 
     def _on_nano_result(self, result: dict):
         """Nano 回传结果（TCP detect_response 原始格式）"""
         if not self._nano_pending:
             return
+        self._nano_timeout_timer.stop()
         self._nano_pending = False
         self.btn_detect.setEnabled(True)
+        path = self._current_nano_path or self._img_path
         from core.class_names import resolve_class_names, class_name_of
         # 下位机类别映射：优先从父窗口 controller 取当前 Nano 模型名
         nano_model = ""
@@ -395,9 +576,16 @@ class LocalImageDetectDialog(QDialog):
             cls = class_name_of(class_names, cid)
             dets.append((cls, det.get("confidence", 0), *box[:4]))
         self._last_ms = result.get("inference_ms", 0) or result.get("timing", {}).get("total_ms", 0)
-        self._show_result(dets)
+        self._results[path] = {"dets": list(dets), "ms": self._last_ms}
+        if self._batch_running:
+            self.lbl_result.setText(
+                f"结果: 批量检测中 {len(self._results)}/{len(self._image_paths)}...")
+            self._show_result(dets)
+            self._batch_next()
+        else:
+            self._show_result(dets)
 
-    def _show_result(self, dets: list):
+    def _show_result(self, dets: list, commit: bool = True):
         self._dets = dets
         self.preview.set_detections(dets)
         has = len(dets) > 0
@@ -411,9 +599,10 @@ class LocalImageDetectDialog(QDialog):
             self.lbl_conf.setText("置信度: --")
         self.lbl_time.setText(f"耗时: {self._last_ms:.0f} ms")
         self.btn_save.setEnabled(True)
-        # 交回主流程（KPI / 写库 / 历史）
-        self.result_committed.emit(
-            {"dets": list(dets), "image_path": self._img_path, "frame": self._frame})
+        # 交回主流程（KPI / 写库 / 历史），浏览历史结果时不重复提交
+        if commit:
+            self.result_committed.emit(
+                {"dets": list(dets), "image_path": self._img_path, "frame": self._frame})
 
     # ---------------- 保存标注图 ----------------
     def _on_save(self):
@@ -436,7 +625,10 @@ class LocalImageDetectDialog(QDialog):
             with open(csv_path, "a", encoding="utf-8-sig") as f:
                 if new:
                     f.write("时间,图片,模型,结果,缺陷数,耗时ms\n")
-                model_name = os.path.basename(self._model) if self._model else "未选择模型"
+                if self._model == _NANO_TAG:
+                    model_name = "Nano 下位机"
+                else:
+                    model_name = os.path.basename(self._model) if self._model else "未选择模型"
                 f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},"
                         f"{self._img_path},{model_name},"
                         f"{'NG' if self._dets else 'OK'},"

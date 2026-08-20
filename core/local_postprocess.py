@@ -9,11 +9,17 @@ def yolo_postprocess(output, scale, pad_w, pad_h, conf_thres=0.25, iou_thres=0.4
     返回: [{"box": [x1,y1,x2,y2], "confidence": f, "class_id": i, "result": "NG"}, ...]
     """
     pred = np.squeeze(output)
-    # 通用转置判断：输出为 (C, N) 且 C 是 4+classes 通道数（6/10/25/80 等）时转成 (N, C)
-    if pred.ndim == 2 and pred.shape[0] in (10, 29, 84, 85, 94):
+    # 通用转置判断：输出为 (C, N)（C=4+classes 恒远小于 anchors 数 N）时转成 (N, C)。
+    # 不再硬编码 10/29/84 等通道数白名单（45 类等新模型通道数=49 会误判方向）
+    if pred.ndim == 2 and pred.shape[0] < pred.shape[1]:
         pred = pred.transpose(1, 0)  # (anchors, 4+classes)
+    elif pred.ndim != 2:
+        # 带批量维等异常布局：报错降级而非裸 ValueError
+        raise ValueError(f"yolo 输出布局异常: shape={output.shape}")
 
     n_anchors, n_feat = pred.shape
+    if n_feat <= 4:
+        raise ValueError(f"yolo 输出特征数异常: {n_feat}")
     n_classes = n_feat - 4
 
     boxes = pred[:, :4]      # (N, 4) xywh
@@ -38,7 +44,9 @@ def yolo_postprocess(output, scale, pad_w, pad_h, conf_thres=0.25, iou_thres=0.4
     y2 = cy + h / 2
     boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
 
-    # 坐标还原（letterbox 逆变换）
+    # 坐标还原（letterbox 逆变换）；scale 为 0（空帧）防御
+    if not scale:
+        return []
     boxes_xyxy[:, [0, 2]] = (boxes_xyxy[:, [0, 2]] - pad_w) / scale
     boxes_xyxy[:, [1, 3]] = (boxes_xyxy[:, [1, 3]] - pad_h) / scale
 

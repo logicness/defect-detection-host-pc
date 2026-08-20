@@ -274,9 +274,11 @@ class CommSettingPage(QWidget):
 
     def append_txrx(self, line: str):
         import time
+        import html as _html
         ts = time.strftime("%H:%M:%S")
+        # 串口内容完全由设备/用户控制，转义防 HTML 注入
         self.txt_log.append(f'<span style="color:#64748b">{ts}</span> '
-                            f'<span style="color:#cbd5e1">{line}</span>')
+                            f'<span style="color:#cbd5e1">{_html.escape(str(line), quote=False)}</span>')
         self.txt_log.verticalScrollBar().setValue(
             self.txt_log.verticalScrollBar().maximum())
 

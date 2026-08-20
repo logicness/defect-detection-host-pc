@@ -9,6 +9,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# ===== 数据隔离：测试不得写入生产 DB/配置/NG 图 =====
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import isolate_test_data as _iso  # noqa: E402
+_TMP = _iso.setup()
+
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 MODEL = r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\runs\neu_yolov8s_e1003\weights\best.onnx"
@@ -37,6 +42,7 @@ def main():
     app = QApplication(sys.argv)
     from main import MainWindow
     win = MainWindow()
+    _iso.isolate_ng_saver(win)
     win.show()
     pump(app)
 

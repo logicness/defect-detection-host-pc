@@ -34,6 +34,7 @@ class StreamEngine(QObject):
         self._local_iou = 0.45
         self._local_class_names = None  # local 模式：类别名表（按模型解析）
         self._warned_none_mode = False  # 仅提示一次
+        self._warned_local_none = False  # local 模式未加载模型仅提示一次
         self._running = False
         self._thread = None
         self._stop_evt = threading.Event()
@@ -74,12 +75,17 @@ class StreamEngine(QObject):
     def start(self):
         if self._running:
             return
+        if self._thread and self._thread.is_alive():
+            # 上次 stop join 超时，旧线程仍存活：拒绝启动，避免双线程并发读同一帧源
+            self.error_occurred.emit("实时流线程仍在运行，无法重新启动（请稍后重试）")
+            return
         if not self.frame_source.open():
             self.error_occurred.emit("帧源打开失败")
             return
         self._running = True
         self._stop_evt.clear()
         self._warned_none_mode = False
+        self._warned_local_none = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.state_changed.emit(True)
@@ -92,6 +98,13 @@ class StreamEngine(QObject):
         self._stop_evt.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                # join 超时（帧源 read 卡死）：不要置空 _thread/关闭帧源，
+                # 否则旧线程继续运行且再次 start 会并发两个线程读同一帧源。
+                # 保持 _thread 引用，start() 检测到存活线程时拒绝启动。
+                self.log_message.emit("WARN", "实时流线程未在 3s 内退出，保持停止状态")
+                self.state_changed.emit(False)
+                return
         self._thread = None
         self.frame_source.close()
         self.state_changed.emit(False)
@@ -111,12 +124,19 @@ class StreamEngine(QObject):
                     # sim 模式仍保留，仅用于开发调试；主流程 _on_start 已禁止直接启动 sim
                     dets = sim_detect(frame, self.frame_source)
                     self.result_received.emit({"detections": dets, "frame": frame})
-                elif self.infer_mode == "local" and self._local_session is not None:
-                    from core.local_infer import infer_frame
-                    dets = infer_frame(self._local_session, frame,
-                                       self._local_conf, self._local_iou,
-                                       class_names=self._local_class_names)
-                    self.result_received.emit({"detections": dets, "frame": frame})
+                elif self.infer_mode == "local":
+                    if self._local_session is None:
+                        # 本地模型加载失败/未加载：明确降级为仅预览，
+                        # 绝不 fall-through 到 TCP 回调（避免把帧误发到下位机）
+                        if not self._warned_local_none:
+                            self._warned_local_none = True
+                            self.log_message.emit("WARN", "本地模型未加载，仅预览无结果")
+                    else:
+                        from core.local_infer import infer_frame
+                        dets = infer_frame(self._local_session, frame,
+                                           self._local_conf, self._local_iou,
+                                           class_names=self._local_class_names)
+                        self.result_received.emit({"detections": dets, "frame": frame})
                 elif self._infer_cb:
                     self._infer_cb(frame)  # tcp：结果异步经 controller 回传
                 else:

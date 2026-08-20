@@ -15,6 +15,7 @@
 """
 import json
 import os
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -72,7 +73,11 @@ class AlarmPusher:
         self._cfg = load_config()
 
     def push(self, message: str) -> bool:
-        """推送告警，返回是否成功发送"""
+        """推送告警（异步：HTTP 在后台线程执行，不阻塞 UI）。
+
+        返回 True 表示告警已受理（通过限额/冷却检查，已入后台发送队列）；
+        发送结果异步更新 _last_push_ts/计数。
+        """
         cfg = self._cfg
         if not cfg.get("enabled") or not cfg.get("webhook"):
             return False
@@ -93,22 +98,25 @@ class AlarmPusher:
             return False
 
         channel = cfg.get("channel", "wecom")
-        ok = False
-        try:
-            if channel == "wecom":
-                ok = self._push_wecom(cfg["webhook"], message)
-            else:
-                ok = self._push_serverchan(cfg["webhook"], message)
-        except Exception:
-            ok = False
+        webhook = cfg.get("webhook", "")
 
-        if ok:
-            self._last_push_ts = time.time()
-            self._today_count += 1
-            self._stat["pushed"] += 1
-        else:
-            self._stat["blocked"] += 1
-        return ok
+        def _worker():
+            try:
+                if channel == "wecom":
+                    ok = self._push_wecom(webhook, message)
+                else:
+                    ok = self._push_serverchan(webhook, message)
+            except Exception:
+                ok = False
+            if ok:
+                self._last_push_ts = time.time()
+                self._today_count += 1
+                self._stat["pushed"] += 1
+            else:
+                self._stat["blocked"] += 1
+
+        threading.Thread(target=_worker, daemon=True, name="alarm-push").start()
+        return True
 
     # ---------------- 通道实现 ----------------
     @staticmethod

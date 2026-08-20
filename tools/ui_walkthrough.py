@@ -15,11 +15,18 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ===== 数据隔离：走查不得写入生产 DB/配置/NG 图 =====
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import isolate_test_data as _iso  # noqa: E402
+_TMP = _iso.setup()
+
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 from PyQt5.QtGui import QFont  # noqa: E402
 
-OUT = os.path.abspath(
-    r"C:\Users\机械革命\.qwenworkcn\workspace\msibcoqey16tgs72\outputs\ui_check")
+# 截图输出相对项目目录（不再硬编码个人机器路径）
+OUT = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "outputs", "ui_check"))
 os.makedirs(OUT, exist_ok=True)
 
 RESULTS = []
@@ -47,6 +54,7 @@ def main():
 
     from main import MainWindow
     win = MainWindow()
+    _iso.isolate_ng_saver(win)
     win.show()
     pump(app, 1.0)
 

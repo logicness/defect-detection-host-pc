@@ -15,6 +15,11 @@ from PyQt5.QtGui import QImage
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ===== 数据隔离：测试不得写入生产 DB/配置/NG 图 =====
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import isolate_test_data as _iso  # noqa: E402
+_TMP = _iso.setup()
+
 import main
 
 MODEL = r"D:/RK3568&Orin Nano/ORIN NANO/Model Training/_archive_20260811/models/production/MVIT_连铸坯_v8s_mAP50_0.830_6类.pt"
@@ -31,6 +36,7 @@ def pump(app, seconds):
 def main_test():
     app = QApplication([])
     w = main.MainWindow()
+    _iso.isolate_ng_saver(w)
     w.show()
     pump(app, 0.3)
 

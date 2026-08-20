@@ -127,6 +127,10 @@ class PLCClient(QObject):
         return struct.unpack(f">{n}H", data[1:])
 
     def _bits(self, payload: bytes, n: int) -> list:
+        # 防御：线圈数据不足时抛明确异常，避免 IndexError 静默错乱
+        need = (n + 7) // 8
+        if len(payload) < need:
+            raise ValueError(f"线圈数据长度不足: {len(payload)} < {need}")
         out = []
         for i in range(n):
             out.append(bool((payload[i // 8] >> (i % 8)) & 1))
@@ -148,14 +152,23 @@ class PLCClient(QObject):
                 if not hdr or len(hdr) < 7:
                     raise ConnectionError("响应头不完整")
                 _, _, ln, _ = struct.unpack(">HHHB", hdr)
+                # Modbus 规范：PDU 长度（含功能码）最多 254；ln-1 为 PDU 长度
+                if ln < 2 or ln > 255:
+                    raise ConnectionError(f"MBAP 长度非法: {ln}")
                 body = self._recv_exact(ln - 1)
+                if not body:
+                    raise ConnectionError("响应 PDU 不完整")
                 self._rx += 1
             except Exception as e:
                 self._err += 1
                 raise e
         rtt = (time.time() - t0) * 1000
-        if body and body[0] & 0x80:
+        # 异常帧：0x80 | fc
+        if body[0] & 0x80:
             raise ModbusError(body[1] if len(body) > 1 else 0)
+        # 功能码校验：对端串扰/重放时防止错配响应当本次结果
+        if body[0] != fc:
+            raise ConnectionError(f"响应功能码不匹配: 期望 {fc}, 实际 {body[0]}")
         self._last_rtt = rtt
         return body[1:] if body else b""
 
@@ -209,8 +222,10 @@ class PLCClient(QObject):
                         self._sock = None
                 self.disconnected.emit()
                 self.log_message.emit("WARN", f"PLC 通信异常: {e}，重连中...")
-                # 「秒断」防护：连接成功但立刻通信异常 → 退避，避免快速重连风暴
-                if last_ok_ts and time.time() - last_ok_ts < 2.0:
-                    time.sleep(self.retry_delay)
+                # 通信失败一律指数退避（TCP 能连但协议不通时防止紧循环重连风暴）
+                retry += 1
+                delay = min(self.retry_delay * (2 ** min(retry, 4)), 30)
+                time.sleep(delay)
                 continue
+            retry = 0
             time.sleep(self.poll_interval)

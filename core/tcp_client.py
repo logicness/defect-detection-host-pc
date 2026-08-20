@@ -2,6 +2,16 @@
 TCP 通信客户端（与下位机 RK3568/Orin 推理服务通信）
 协议：4 字节大端长度包头 + UTF-8 JSON 载荷
 功能：心跳保活 + 看门狗（半开连接主动重连）+ 指数退避重连 + 发送图片/接收结果 + 参数下发 + 模型管理
+
+2026-08-20 重构（修复）：
+- 持锁 sendall → 锁内只取 sock 引用，锁外发送（原实现发送缓冲写满时持锁无限阻塞，
+  看门狗/重连等同一把锁 → 永久死锁、连接悬挂）
+- socket 读写超时 = 心跳间隔（原 settimeout(None) 无限阻塞，半开连接永久卡死）
+- epoch 代际机制：旧连接的心跳/发送/接收线程自动退出，杜绝重连后双线程
+- 心跳/发送线程退出时主动关闭 socket（不再无人关连接）
+- 发送队列有界 + 实时流丢帧策略（原无界队列上传模型时内存无上限）
+- 宽异常捕获（UnicodeDecodeError / 非 dict 载荷不再导致线程静默死亡）
+- 秒断指数退避（原无退避重连风暴）
 """
 import base64
 import hashlib
@@ -12,12 +22,13 @@ import struct
 import threading
 import time
 import logging
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from PyQt5.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1 * 1024 * 1024  # 模型分片上传：1MB/片
+SEND_QUEUE_MAX = 64           # 发送队列上限（实时流丢帧策略，内存有界）
 
 
 class TCPClient(QObject):
@@ -39,9 +50,10 @@ class TCPClient(QObject):
         self._running = False
         self._connected = False
         self._lock = threading.Lock()
-        self._send_queue = Queue()
+        self._send_queue = Queue(maxsize=SEND_QUEUE_MAX)
         self._recv_thread = None
         self._last_recv = 0.0
+        self._epoch = 0  # 连接代际：每次连接递增，旧线程据此退出
 
         self.host = "192.168.1.101"
         self.port = 8888
@@ -75,13 +87,14 @@ class TCPClient(QObject):
 
     def disconnect(self):
         self._running = False
-        self._connected = False
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        with self._lock:
+            self._connected = False
+            if self._sock:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
         while not self._send_queue.empty():
             try:
                 self._send_queue.get_nowait()
@@ -92,7 +105,7 @@ class TCPClient(QObject):
 
     # ---------------- 发送 ----------------
     def send_image(self, image_bytes: bytes):
-        """detect_request：base64 图片"""
+        """detect_request：base64 图片（实时流高频，队列满时丢最旧帧）"""
         self._enqueue({"type": "detect_request",
                        "image_base64": base64.b64encode(image_bytes).decode("ascii"),
                        "timestamp": time.time()})
@@ -138,7 +151,7 @@ class TCPClient(QObject):
                 return
             self._enqueue({"type": "model_upload_start",
                            "filename": filename, "size": size,
-                           "chunk_size": CHUNK_SIZE})
+                           "chunk_size": CHUNK_SIZE}, block=True)
             sha = hashlib.sha256()
             seq = 0
             with open(path, "rb") as f:
@@ -147,18 +160,18 @@ class TCPClient(QObject):
                     if not chunk:
                         break
                     sha.update(chunk)
+                    # 上传用阻塞入队（背压）：链路慢时等待而不是把整个模型堆进内存
                     self._enqueue({
                         "type": "model_upload_chunk",
                         "filename": filename,
                         "seq": seq,
                         "data": base64.b64encode(chunk).decode("ascii"),
-                    })
+                    }, block=True)
                     seq += 1
                     if progress_cb:
                         progress_cb(min(seq * CHUNK_SIZE, size), size)
-                    time.sleep(0.01)  # 让出发送线程
             self._enqueue({"type": "model_upload_end",
-                           "filename": filename, "checksum": sha.hexdigest()})
+                           "filename": filename, "checksum": sha.hexdigest()}, block=True)
             if progress_cb:
                 progress_cb(size, size)
             self.log_message.emit(
@@ -166,31 +179,53 @@ class TCPClient(QObject):
         except Exception as e:
             self.log_message.emit("ERROR", f"模型上传失败: {e}")
 
-    def _enqueue(self, payload: dict):
-        self._send_queue.put(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    def _enqueue(self, payload: dict, block: bool = False):
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if block:
+            self._send_queue.put(data)
+            return
+        try:
+            self._send_queue.put_nowait(data)
+        except Full:
+            # 队列满：丢弃最旧一帧（实时流丢帧策略），保证内存有界
+            try:
+                self._send_queue.get_nowait()
+                self._send_queue.put_nowait(data)
+            except Exception:
+                pass
+            self.log_message.emit("WARN", "发送队列已满，丢弃最旧消息（实时流丢帧）")
 
     # ---------------- 内部线程 ----------------
+    def _new_epoch(self) -> int:
+        with self._lock:
+            self._epoch += 1
+            return self._epoch
+
     def _connect_loop(self):
         retry = 0
         last_ok_ts = 0.0  # 上次连接成功时间（用于检测「秒断」风暴）
         while self._running:
+            epoch = self._new_epoch()
             try:
                 self.log_message.emit("INFO", f"正在连接 {self.host}:{self.port}...")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(self.timeout)
                 sock.connect((self.host, self.port))
-                sock.settimeout(None)
+                # 读写超时 = 心跳间隔：半开连接/对端停止读取时能自动恢复，
+                # 不再无限阻塞（原 settimeout(None) 会导致连接永久悬挂）
+                sock.settimeout(self.heartbeat_interval)
                 with self._lock:
                     self._sock = sock
                     self._connected = True
+                    self._epoch = epoch
                 retry = 0
                 last_ok_ts = time.time()
                 self._last_recv = time.time()
                 self.connected.emit()
                 self.log_message.emit("INFO", f"已连接 {self.host}:{self.port}")
-                threading.Thread(target=self._heartbeat_loop, daemon=True).start()
-                threading.Thread(target=self._send_loop, daemon=True).start()
-                self._recv_loop()
+                threading.Thread(target=self._heartbeat_loop, args=(epoch,), daemon=True).start()
+                threading.Thread(target=self._send_loop, args=(epoch,), daemon=True).start()
+                self._recv_loop(epoch)
             except (ConnectionRefusedError, socket.timeout, OSError) as e:
                 retry += 1
                 if retry <= self.max_retries:
@@ -213,62 +248,79 @@ class TCPClient(QObject):
                         except OSError:
                             pass
                         self._sock = None
-                if self._running:
+                if self._running and epoch == self._epoch:
                     self.disconnected.emit()
-                # 手动连接模式：不自动重连，失败后直接退出循环
+                # 秒断退避：连接成功但存活过短 → 指数退避，避免无退避重连风暴
                 if self._running and last_ok_ts and time.time() - last_ok_ts < 2.0:
-                    self.log_message.emit("WARN", "连接存活过短，请手动点击「重新连接」")
+                    delay = min(2 ** max(retry, 1), 15)
+                    self.log_message.emit("WARN", f"连接存活过短，{delay}s 后重试")
+                    time.sleep(delay)
 
-    def _heartbeat_loop(self):
-        """心跳 + 看门狗：3 个周期无任何接收 → 判定对端失联，主动重连"""
-        while self._running and self._connected:
-            time.sleep(self.heartbeat_interval)
-            if not self._connected:
-                break
-            try:
-                self._send_raw(json.dumps(
-                    {"type": "heartbeat", "timestamp": time.time()}).encode("utf-8"))
-                if time.time() - self._last_recv > self.heartbeat_interval * 3:
-                    self.log_message.emit("WARN", "心跳看门狗: 3 周期无数据，判定对端失联，主动重连")
+    def _heartbeat_loop(self, epoch):
+        """心跳 + 看门狗：3 个周期无任何接收 → 判定对端失联，主动重连。
+        线程退出（异常/代际过期）时主动关闭 socket，杜绝连接悬挂无人回收。"""
+        try:
+            while self._running and self._connected and epoch == self._epoch:
+                time.sleep(self.heartbeat_interval)
+                if not self._connected or epoch != self._epoch:
+                    break
+                try:
+                    self._send_raw(json.dumps(
+                        {"type": "heartbeat", "timestamp": time.time()}).encode("utf-8"))
+                    if time.time() - self._last_recv > self.heartbeat_interval * 3:
+                        self.log_message.emit(
+                            "WARN", "心跳看门狗: 3 周期无数据，判定对端失联，主动重连")
+                        self._force_reconnect()
+                        break
+                except Exception as e:
+                    self.log_message.emit("WARN", f"心跳发送失败: {e}")
                     self._force_reconnect()
                     break
-            except Exception as e:
-                self.log_message.emit("WARN", f"心跳发送失败: {e}")
-                break
+        finally:
+            # 心跳线程退出即意味着连接异常或已换代：确保 socket 被关闭
+            if epoch == self._epoch and self._connected:
+                self._force_reconnect()
 
     def _force_reconnect(self):
+        """不取锁关闭 socket：锁可能被（旧实现遗留的）持锁 sendall 占着，
+        socket 句柄的 shutdown/close 本身是线程安全的。"""
         with self._lock:
+            sock = self._sock
             self._connected = False
-            if self._sock:
-                try:
-                    self._sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    self._sock.close()
-                except OSError:
-                    pass
-                self._sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
-    def _send_loop(self):
-        while self._running and self._connected:
+    def _send_loop(self, epoch):
+        while self._running and self._connected and epoch == self._epoch:
             try:
                 data = self._send_queue.get(timeout=1)
-                self._send_raw(data)
             except Empty:
                 continue
+            try:
+                self._send_raw(data)
             except Exception as e:
                 self.log_message.emit("ERROR", f"发送失败: {e}")
+                self._force_reconnect()
                 break
 
     def _send_raw(self, data: bytes):
+        # 锁内只取 socket 引用，sendall 在锁外执行：
+        # 发送缓冲写满时 sendall 会阻塞，若持锁则看门狗/重连永远等不到锁 → 死锁
         with self._lock:
             if not self._sock:
                 raise ConnectionError("Socket not connected")
-            self._sock.sendall(struct.pack(">I", len(data)) + data)
+            sock = self._sock
+        sock.sendall(struct.pack(">I", len(data)) + data)
 
-    def _recv_loop(self):
-        while self._running and self._connected:
+    def _recv_loop(self, epoch):
+        while self._running and self._connected and epoch == self._epoch:
             try:
                 header = self._recv_exact(4)
                 if not header:
@@ -282,6 +334,10 @@ class TCPClient(QObject):
                     break
                 self._last_recv = time.time()
                 payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    self.log_message.emit(
+                        "WARN", f"收到非 dict 载荷: {type(payload).__name__}")
+                    continue
                 t = payload.get("type", "")
                 if t == "heartbeat_ack":
                     pass
@@ -303,11 +359,20 @@ class TCPClient(QObject):
                     self.error_occurred.emit(payload.get("message", "未知错误"))
                 else:
                     self.log_message.emit("DEBUG", f"收到未知类型消息: {t}")
-            except json.JSONDecodeError as e:
-                self.log_message.emit("ERROR", f"JSON 解析失败: {e}")
+            except socket.timeout:
+                # 心跳间隔内无数据属正常（读超时 = heartbeat_interval）
+                continue
+            except (UnicodeDecodeError, json.JSONDecodeError,
+                    AttributeError, ValueError) as e:
+                # 坏载荷不影响帧同步（4 字节长度头已消费），记录后继续
+                self.log_message.emit("WARN", f"载荷解析异常: {e}")
+                continue
             except OSError as e:
-                if self._running:
+                if self._running and epoch == self._epoch:
                     self.log_message.emit("WARN", f"连接断开: {e}")
+                break
+            except Exception as e:
+                self.log_message.emit("WARN", f"接收异常: {e}")
                 break
 
     @staticmethod
@@ -329,3 +394,9 @@ class TCPClient(QObject):
             return self._recv_exact_sock(sock, n)
         except OSError:
             return None
+
+
+def queue_full():
+    """兼容 Queue.Full（直接引用避免导入名冲突）"""
+    from queue import Full
+    return Full

@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from components.common_widgets import SpinBox
 
 CANVAS_W, CANVAS_H = 560, 380
 _MARGIN = 14
@@ -332,6 +333,13 @@ class RoiEditDialog(QDialog):
     def _on_ok(self):
         self._roi["name"] = self.edit_name.text().strip() or "ROI"
         self._roi["enabled"] = self.check_enabled.isChecked()
+        # 按画布虚拟尺寸（图像像素）钳制，防保存越界 ROI 导致下游 crop 报错/黑图
+        iw, ih = self.canvas._img_w, self.canvas._img_h
+        r = self._roi
+        r["x"] = int(max(0, min(iw - 1, r.get("x", 0))))
+        r["y"] = int(max(0, min(ih - 1, r.get("y", 0))))
+        r["w"] = int(max(1, min(iw - r["x"], r.get("w", 1))))
+        r["h"] = int(max(1, min(ih - r["y"], r.get("h", 1))))
         self.accept()
 
     def result_roi(self) -> dict:

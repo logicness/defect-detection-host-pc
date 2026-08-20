@@ -42,7 +42,7 @@ class SerialClient(QObject):
         if not HAS_SERIAL:
             self.error_occurred.emit("pyserial 未安装")
             return False
-        self.close()
+        self.close()  # 先关闭旧连接（内部 join 旧读线程，防双读线程竞态）
         try:
             sb = {1: serial.STOPBITS_ONE, 1.5: serial.STOPBITS_ONE_POINT_FIVE,
                   2: serial.STOPBITS_TWO}.get(float(stopbits), serial.STOPBITS_ONE)
@@ -67,6 +67,12 @@ class SerialClient(QObject):
             except Exception:
                 pass
             self._ser = None
+        # join 旧读线程：防止快速重开时旧线程醒来继续读新端口对象
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
         self.disconnected.emit()
 
     def send(self, data: bytes) -> bool:

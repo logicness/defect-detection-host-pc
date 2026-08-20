@@ -153,7 +153,7 @@ def main():
     it = dlg.tree.invisibleRootItem()
     groups = [it.child(i).text(0) for i in range(it.childCount())]
     check("树形列表含本地库/下位机分组",
-          "本地库" in groups and "下位机" in groups)
+          any("本地" in g for g in groups) and any("下位机" in g for g in groups))
 
     # ---- 从扫描结果添加进模型库（v1.4 流程：扫描 → 选中 → 添加到库）----
     dlg._scan_results = [MODEL]

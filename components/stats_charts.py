@@ -84,13 +84,20 @@ class DefectPieChart(FigureCanvas):
         """types: [{"defect_type","count","avg_conf"},...]"""
         self.ax.clear()
         self._style()
-        if not types:
+        # 防御：过滤 count<=0 / 非数值项（全 0 或脏数据时 pie 会除零/NaN）
+        try:
+            valid = [t for t in (types or [])
+                     if t and isinstance(t.get("count", 0), (int, float))
+                     and t["count"] > 0]
+        except Exception:
+            valid = []
+        if not valid:
             self.ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
                          color="#64748b", fontsize=13)
             self.draw()
             return
-        labels = [t["defect_type"] for t in types]
-        counts = [t["count"] for t in types]
+        labels = [str(t["defect_type"]) for t in valid]
+        counts = [t["count"] for t in valid]
         colors = ["#60a5fa", "#f59e0b", "#22c55e", "#a855f7",
                   "#ef4444", "#06b6d4", "#ec4899", "#84cc16"]
         # 合并极小项
@@ -100,13 +107,20 @@ class DefectPieChart(FigureCanvas):
             keep.append(sum(counts[7:]))
             keep_labels.append("其他")
             counts, labels = keep, keep_labels
-        wedges, _, autotexts = self.ax.pie(
-            counts, labels=labels, autopct="%1.0f%%", startangle=90,
-            colors=colors[:len(counts)], textprops={"color": "#e2e8f0", "fontsize": 9},
-            wedgeprops={"edgecolor": "#111827", "linewidth": 1})
-        for at in autotexts:
-            at.set_color("#0f172a")
-        self.fig.tight_layout()
+        try:
+            wedges, _, autotexts = self.ax.pie(
+                counts, labels=labels, autopct="%1.0f%%", startangle=90,
+                colors=colors[:len(counts)], textprops={"color": "#e2e8f0", "fontsize": 9},
+                wedgeprops={"edgecolor": "#111827", "linewidth": 1})
+            for at in autotexts:
+                at.set_color("#0f172a")
+            self.fig.tight_layout()
+        except Exception:
+            # 绘图异常兜底：不把异常抛回 UI 槽
+            self.ax.clear()
+            self._style()
+            self.ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                         color="#64748b", fontsize=13)
         self.draw()
 
 

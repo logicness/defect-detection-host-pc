@@ -360,9 +360,16 @@ class HistoryRecordPage(QWidget):
             img = QImage(path)
             if not img.isNull():
                 self.preview.set_image(img)
-                self.preview.set_detections(
-                    [(r["defect_type"], r["confidence"], *map(float, r["bbox"].split(",")))]
-                    if res == "NG" and r.get("bbox") else [])
+                dets = []
+                if res == "NG" and r.get("bbox"):
+                    # 防御：bbox 字符串格式异常（空/段数≠4/脏数据）不崩溃
+                    try:
+                        b = [float(x) for x in str(r.get("bbox", "")).split(",")]
+                        if len(b) == 4:
+                            dets = [(r["defect_type"], r["confidence"], *b)]
+                    except (ValueError, TypeError):
+                        dets = []
+                self.preview.set_detections(dets)
                 return
         self.preview.set_image(QImage())
         self.preview.set_detections([])
@@ -384,7 +391,8 @@ class HistoryRecordPage(QWidget):
             _popup(self, "无图像", "当前记录没有关联的图像文件。")
             return
         if os.path.exists(path):
-            subprocess.run(["explorer", "/select,", os.path.normpath(path)])
+            # Popen 不等待 explorer 退出（run 会阻塞 UI 直到 explorer 关闭）
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
         else:
             _popup(self, "图像不存在",
                    f"原图文件不存在或已被移动：\n{path}")

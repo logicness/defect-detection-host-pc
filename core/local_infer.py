@@ -41,24 +41,23 @@ class LocalInferEngine(QObject):
         return self._busy
 
     def cancel(self):
+        """请求取消当前推理；实际线程不会中断，但结果不会被发出"""
         self._cancelled = True
 
     def detect(self, image_path: str, model_path: str, conf_thres=0.25, iou_thres=0.45):
         """异步执行本地推理（后台线程，不阻塞 UI）"""
-        if self._busy:
-            self.error_ready.emit("本地推理正在进行中，请稍候")
-            return
-        self._cancelled = False
-        self._busy = True
+        # check-then-set 必须原子：两个线程同时调用 detect 会并发两个推理线程
+        with self._lock:
+            if self._busy:
+                self.error_ready.emit("本地推理正在进行中，请稍候")
+                return
+            self._cancelled = False
+            self._busy = True
         self.status_changed.emit(True)
         threading.Thread(
             target=self._worker, daemon=True,
             args=(image_path, model_path, conf_thres, iou_thres),
         ).start()
-
-    def cancel(self):
-        """请求取消当前推理；实际线程不会中断，但结果不会被发出"""
-        self._cancelled = True
 
     # ---------- 后台线程 ----------
     def _worker(self, image_path, model_path, conf_thres, iou_thres):
@@ -103,9 +102,11 @@ class LocalInferEngine(QObject):
         t0 = time.perf_counter()
         model = YOLO(model_path)
         t_load = time.perf_counter()
+        # 用模型自身训练尺寸，避免硬编码 640 与训练尺寸（256 等）不一致导致精度/坐标偏差
+        imgsz = getattr(model, "imgsz", 640) or 640
         results = model.predict(
             img, conf=conf, iou=iou, verbose=False,
-            imgsz=640, device="cpu",
+            imgsz=imgsz, device="cpu",
         )
         t_infer = time.perf_counter()
         r = results[0]
@@ -191,6 +192,10 @@ def load_session(model_path: str):
         if s is None:
             import onnxruntime as ort
             s = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            # 缓存上限 2 个 session：每个 session 常驻内存可达数百 MB，
+            # 无上限缓存反复切换模型会 OOM（clear_session_cache 无调用方兜底）
+            if len(_session_cache) >= 2:
+                _session_cache.clear()
             _session_cache[key] = s
         return s
 

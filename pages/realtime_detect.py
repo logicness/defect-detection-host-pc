@@ -7,7 +7,7 @@ P1 实时检测页（设计稿图 1）
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QTabWidget, QTextEdit, QDialog,
+    QLineEdit, QTabWidget, QTextEdit, QDialog, QProgressBar,
     QGridLayout, QSizePolicy, QFileDialog, QTableWidgetItem, QHeaderView,
     QScrollArea
 )
@@ -16,7 +16,7 @@ from PyQt5.QtGui import QColor
 
 from components.common_widgets import (
     Card, KPICard, StatusLight, StyledTable, form_row,
-    SpinBox, DoubleSpinBox, FocusComboBox
+    SpinBox, DoubleSpinBox, FocusComboBox, SegGroup
 )
 from components.image_preview import ImagePreview
 from components.roi_editor import RoiEditDialog
@@ -67,6 +67,55 @@ class RealtimeDetectPage(QWidget):
         bottom.addLayout(self._build_mini_log(), 4)
         root.addLayout(bottom, 1)
 
+    def set_source(self, text: str, color: str = "#22d3ee"):
+        """设置当前检测源提示（PC 本地 / Nano 下位机）"""
+        if not hasattr(self, "lbl_source"):
+            return
+        self.lbl_source.setText(f"当前检测源: {text}")
+        self.lbl_source.setStyleSheet(
+            f"color:{color}; font-size:14px; padding:6px 10px;"
+            "background:#0f172a; border:1px solid #1e293b; border-radius:6px;")
+
+    # ---------- 检测模式 ----------
+    def _build_mode_card(self):
+        card = Card("检测模式")
+        card.body.setSpacing(6)
+
+        self.seg_mode = SegGroup(["单次检测", "多次检测"])
+        self.seg_mode.selected.connect(self._on_mode_changed)
+        card.body.addWidget(self.seg_mode)
+
+        # 推理源
+        self.combo_source = FocusComboBox()
+        self.combo_source.addItems(["PC 本地模型", "Nano 下位机模型"])
+        card.body.addLayout(form_row("推理源", self.combo_source, 70))
+
+        # 模式提示
+        self.lbl_mode_hint = QLabel("单次：一次选择一张图片")
+        self.lbl_mode_hint.setWordWrap(True)
+        self.lbl_mode_hint.setStyleSheet(
+            "color:#94a3b8; font-size:13px; background:transparent;")
+        card.body.addWidget(self.lbl_mode_hint)
+
+        return card
+
+    def _on_mode_changed(self, mode: str):
+        """单次/多次切换：更新提示"""
+        if mode == "多次检测":
+            self.lbl_mode_hint.setText("多次：可选多张图片，点「开始检测」批量检测")
+        else:
+            self.lbl_mode_hint.setText("单次：一次选择一张图片")
+
+    def get_detect_mode(self) -> str:
+        return self.seg_mode.current()
+
+    def get_infer_source(self) -> str:
+        return self.combo_source.currentText()
+
+    def update_nav(self, index: int, total: int):
+        """兼容占位：上一张/下一张功能已移除（8-20），保留签名供 main.py 调用"""
+        pass
+
     # ---------- 左栏 ----------
     def _build_left(self):
         # 整体垂直布局
@@ -101,6 +150,8 @@ class RealtimeDetectPage(QWidget):
                        ("增益 (dB)", self.spin_gain), ("光源亮度", self.spin_bright)):
             cam.body.addLayout(form_row(lbl, w, 160))
         col.addWidget(cam)
+
+        col.addWidget(self._build_mode_card())
 
         det = Card("检测参数")
         det.body.setSpacing(4)
@@ -144,6 +195,14 @@ class RealtimeDetectPage(QWidget):
         scroll.setWidget(container)
         left_layout.addWidget(scroll, 1)  # 滚动区域占据剩余空间
 
+        # 当前检测源提示（PC 本地 / Nano 下位机）
+        self.lbl_source = QLabel("当前检测源: --")
+        self.lbl_source.setWordWrap(True)
+        self.lbl_source.setStyleSheet(
+            "color:#22d3ee; font-size:14px; padding:6px 10px;"
+            "background:#0f172a; border:1px solid #1e293b; border-radius:6px;")
+        left_layout.addWidget(self.lbl_source)
+
         # 四个按钮固定在底部，不滚动
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(12, 0, 0, 0)
@@ -163,6 +222,8 @@ class RealtimeDetectPage(QWidget):
         btn_row2.setContentsMargins(12, 0, 0, 0)
         self.btn_local_image = QPushButton("⌕ 本地图片")
         self.btn_local_image.setFixedHeight(40)
+        self.btn_local_image.setToolTip(
+            "单次模式：选择一张图片；多次模式：可选择多张图片批量检测")
         self.btn_local_image.clicked.connect(lambda: self.local_image_requested.emit())
         self.btn_save = QPushButton("◉  保存图像")
         self.btn_save.setFixedHeight(40)
@@ -203,6 +264,8 @@ class RealtimeDetectPage(QWidget):
         self.zoom_lbl.setAlignment(Qt.AlignCenter)
         bar.addWidget(self.zoom_lbl)
         tbtn("＋", "放大", lambda: self._zoom(0.1))
+        bar.addStretch()
+        # 多图导航（上一张/下一张）已移除（8-20）
         bar.addStretch()
         tbtn("网格", "网格", lambda: None, 44)
         tbtn("分屏", "分屏", lambda: None, 44)
@@ -378,6 +441,20 @@ class RealtimeDetectPage(QWidget):
         self.mini_log = QTextEdit()
         self.mini_log.setReadOnly(True)
         card.body.addWidget(self.mini_log, stretch=1)
+        # 批量检测进度条（放在日志文本下方）
+        self.lbl_batch_prog = QLabel("")
+        self.lbl_batch_prog.setStyleSheet("color:#22d3ee; font-size:13px; background:transparent;")
+        self.lbl_batch_prog.setVisible(False)
+        card.body.addWidget(self.lbl_batch_prog)
+        self.bar_batch = QProgressBar()
+        self.bar_batch.setFixedHeight(8)
+        self.bar_batch.setTextVisible(False)
+        self.bar_batch.setVisible(False)
+        self.bar_batch.setStyleSheet(
+            "QProgressBar{background:#1e293b; border:none; border-radius:4px;}"
+            "QProgressBar::chunk{background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0, stop:0 #22d3ee, stop:1 #3b82f6); border-radius:4px;}")
+        card.body.addWidget(self.bar_batch)
         col.addWidget(card, stretch=1)
         return col
 
@@ -510,14 +587,34 @@ class RealtimeDetectPage(QWidget):
 
     def append_mini_log(self, level: str, msg: str):
         import time as _t
+        import html as _html
         color = {"INFO": "#22c55e", "WARN": "#f59e0b",
                  "ERROR": "#ef4444"}.get(level, "#94a3b8")
         ts = _t.strftime("%H:%M:%S")
+        # msg 可能含 <>&（路径/模型名/串口内容），转义防 HTML 注入
+        safe = _html.escape(str(msg), quote=False)
         self.mini_log.append(
             f'<span style="color:#64748b">{ts}</span> '
-            f'<span style="color:{color}">[{level}] {msg}</span>')
+            f'<span style="color:{color}">[{_html.escape(level)}] {safe}</span>')
         self.mini_log.verticalScrollBar().setValue(
             self.mini_log.verticalScrollBar().maximum())
+
+    def update_batch_progress(self, done: int, total: int):
+        """更新批量检测进度条"""
+        if total <= 0:
+            self.bar_batch.setVisible(False)
+            self.lbl_batch_prog.setVisible(False)
+            return
+        self.bar_batch.setVisible(True)
+        self.lbl_batch_prog.setVisible(True)
+        pct = int(done / total * 100)
+        self.bar_batch.setValue(pct)
+        if done >= total:
+            self.lbl_batch_prog.setText(f"批量检测完成 {done}/{total} 张 ✅")
+            self.lbl_batch_prog.setStyleSheet("color:#22c55e; font-size:13px; background:transparent;")
+        else:
+            self.lbl_batch_prog.setText(f"批量检测中 {done}/{total} 张...")
+            self.lbl_batch_prog.setStyleSheet("color:#22d3ee; font-size:13px; background:transparent;")
 
     def set_plc_light(self, on: bool):
         self.light_plc_mini.set_status(1 if on else 0, "已连接" if on else "未连接")
