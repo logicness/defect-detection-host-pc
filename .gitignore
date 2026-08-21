@@ -10,7 +10,15 @@ __pycache__/
 
 # 本地数据
 data/alarm_config.json
+data/cred_check.txt
+data/*.db
+data/tcp_debug.log
 crash.log
+
+# 工作区/Agent 产物
+.design/
+.workbuddy/
+.dsh-trash/
 
 # 测试临时
 *.log
