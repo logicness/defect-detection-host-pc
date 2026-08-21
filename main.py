@@ -207,6 +207,8 @@ class MainWindow(QMainWindow):
         self.page_realtime.save_path_changed.connect(self._on_save_path_changed)
         self.page_realtime.reconnect_requested.connect(self._on_tcp_reconnect)
         self.page_realtime.conf_changed.connect(self._on_conf_changed)
+        self.page_realtime.prev_image_requested.connect(self._on_nav_prev)
+        self.page_realtime.next_image_requested.connect(self._on_nav_next)
 
         # 参数页
         self.page_param.params_apply_requested.connect(self._on_params_apply)
@@ -505,10 +507,28 @@ class MainWindow(QMainWindow):
                 f"模型推理时出错:\n{msg}\n\n"
                 "请检查模型文件是否完整，或尝试其他 .onnx / .pt 模型。")
 
-    def _on_stop(self):
-        """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片"""
+    def _on_stop(self, cancel_batch: bool = True):
+        """停止实时流；保留本地图片模式，方便用户再次点击开始检测同一图片。
+        cancel_batch=False 仅供内部加载图片时清框使用（不清空批量队列）。"""
         # 标记停止：后续延迟到达的推理结果不再渲染，避免停止后框又出现
         self._detection_paused = True
+        # 用户主动停止 → 取消未完成的批量检测：清队列/清 Nano 挂起请求，
+        # 避免延迟结果继续翻页或画框
+        if cancel_batch:
+            was_batch = (getattr(self, "_batch_running", False)
+                         or bool(self._batch_queue) or bool(self._nano_local_pending))
+            self._batch_running = False
+            self._batch_queue = []
+            self._nano_local_pending = ""
+            if was_batch:
+                done = len(self._multi_results)
+                total = len(self._multi_image_paths)
+                self.page_realtime.lbl_batch_prog.setVisible(True)
+                self.page_realtime.lbl_batch_prog.setText(
+                    f"批量检测已停止（{done}/{total} 完成）")
+                self.page_realtime.lbl_batch_prog.setStyleSheet(
+                    "color:#f59e0b; font-size:13px; background:transparent;")
+                self.page_realtime.bar_batch.setVisible(False)
         if self.stream_engine.is_running:
             self.stream_engine.stop()
         eng = getattr(self, "_local_infer_engine", None)
@@ -1197,7 +1217,8 @@ class MainWindow(QMainWindow):
         if _img is None:
             self.controller.log_message.emit("ERROR", "检测", f"无法读取图片: {path}")
             return
-        self._on_stop()
+        # 内部清框不取消批量（批量流程中 _batch_next 会调用本方法逐张加载）
+        self._on_stop(cancel_batch=False)
         self._local_image = _img
         self._local_image_path = path
         self._local_image_active = True
@@ -1211,6 +1232,15 @@ class MainWindow(QMainWindow):
 
     def _start_batch(self):
         """启动批量检测：依次检测所有未检测的图片"""
+        # 推理源为 Nano 但未连接 → 明确中止，绝不把图片静默记为 OK
+        source = self.page_realtime.get_infer_source()
+        if "Nano" in source and not self.controller.tcp.is_connected:
+            self.controller.log_message.emit(
+                "WARN", "检测",
+                "推理源为 Nano 下位机但未连接，批量检测未启动。请先连接下位机或切换为 PC 本地模型")
+            self.status_left.setText("批量检测未启动　|　Nano 未连接")
+            self.page_realtime.set_running(False)
+            return
         self._batch_running = True
         self._batch_queue = [p for p in self._multi_image_paths if p not in self._multi_results]
         total = len(self._multi_image_paths)
@@ -1242,9 +1272,13 @@ class MainWindow(QMainWindow):
 
         source = self.page_realtime.get_infer_source()
         if "Nano" in source and self.controller.tcp.is_connected:
-            # Nano 下位机推理
+            # Nano 下位机推理（日志明确记录推理源，便于排查）
             self._nano_local_pending = path
-            self.status_left.setText(f"批量检测 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}] 推理中...")
+            self.controller.log_message.emit(
+                "INFO", "检测",
+                f"Nano 下位机推理 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}]: "
+                f"{os.path.basename(path)}")
+            self.status_left.setText(f"批量检测 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}] Nano 推理中...")
             ok, buf = cv2.imencode(".jpg", self._local_image)
             if ok:
                 self.controller.send_image(buf.tobytes(), path)
@@ -1320,6 +1354,18 @@ class MainWindow(QMainWindow):
             self.page_realtime.update_detections([])
             self.status_left.setText(f"多图检测 [{idx+1}/{len(paths)}] {os.path.basename(path)}　| 未检测")
         self.page_realtime.update_nav(idx, len(paths))
+
+    def _on_nav_prev(self):
+        """多图导航：上一张（批量检测进行中不响应，避免与自动翻页竞争）"""
+        if self._batch_running:
+            return
+        self._show_multi_image(self._multi_image_idx - 1)
+
+    def _on_nav_next(self):
+        """多图导航：下一张（批量检测进行中不响应，避免与自动翻页竞争）"""
+        if self._batch_running:
+            return
+        self._show_multi_image(self._multi_image_idx + 1)
 
     def _on_batch_detect(self):
         """实时页「批量检测」：打开多图检测对话框，支持 PC 本地 / Nano 下位机"""

@@ -41,10 +41,14 @@ class RealtimeDetectPage(QWidget):
     reconnect_requested = pyqtSignal()
     roi_changed = pyqtSignal(list)
     conf_changed = pyqtSignal(float)   # 实时置信度数值变化
+    prev_image_requested = pyqtSignal()   # 多图导航：上一张
+    next_image_requested = pyqtSignal()   # 多图导航：下一张
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rois = []
+        self._nav_index = 0   # 多图导航当前下标
+        self._nav_total = 0   # 多图导航总数
         self._build()
 
     # ================= 布局 =================
@@ -100,11 +104,12 @@ class RealtimeDetectPage(QWidget):
         return card
 
     def _on_mode_changed(self, mode: str):
-        """单次/多次切换：更新提示"""
+        """单次/多次切换：更新提示；单次模式下禁用多图导航"""
         if mode == "多次检测":
             self.lbl_mode_hint.setText("多次：可选多张图片，点「开始检测」批量检测")
         else:
             self.lbl_mode_hint.setText("单次：一次选择一张图片")
+            self.update_nav(0, 0)
 
     def get_detect_mode(self) -> str:
         return self.seg_mode.current()
@@ -119,8 +124,19 @@ class RealtimeDetectPage(QWidget):
             self.combo_source.setCurrentIndex(idx)
 
     def update_nav(self, index: int, total: int):
-        """兼容占位：上一张/下一张功能已移除（8-20），保留签名供 main.py 调用"""
-        pass
+        """多图导航：刷新 上一张/下一张 按钮与 x/y 下标标签。
+        total<=1 时按钮禁用（单图无需导航）。"""
+        self._nav_index = max(0, int(index))
+        self._nav_total = max(0, int(total))
+        if not hasattr(self, "btn_nav_prev"):
+            return
+        if self._nav_total > 0:
+            self.lbl_nav_index.setText(f"{self._nav_index + 1}/{self._nav_total}")
+        else:
+            self.lbl_nav_index.setText("0/0")
+        multi = self._nav_total > 1
+        self.btn_nav_prev.setEnabled(multi and self._nav_index > 0)
+        self.btn_nav_next.setEnabled(multi and self._nav_index < self._nav_total - 1)
 
     # ---------- 左栏 ----------
     def _build_left(self):
@@ -271,7 +287,17 @@ class RealtimeDetectPage(QWidget):
         bar.addWidget(self.zoom_lbl)
         tbtn("＋", "放大", lambda: self._zoom(0.1))
         bar.addStretch()
-        # 多图导航（上一张/下一张）已移除（8-20）
+        # 多图导航（上一张/下一张）：多次检测批量完成后可逐张查看结果
+        self.btn_nav_prev = tbtn("◀ 上一张", "查看上一张图片的检测结果",
+                                 lambda: self.prev_image_requested.emit(), 64)
+        self.lbl_nav_index = QLabel("0/0")
+        self.lbl_nav_index.setStyleSheet("color:#94a3b8; background:transparent;")
+        self.lbl_nav_index.setFixedWidth(48)
+        self.lbl_nav_index.setAlignment(Qt.AlignCenter)
+        bar.addWidget(self.lbl_nav_index)
+        self.btn_nav_next = tbtn("下一张 ▶", "查看下一张图片的检测结果",
+                                 lambda: self.next_image_requested.emit(), 64)
+        self.update_nav(self._nav_index, self._nav_total)
         bar.addStretch()
         tbtn("网格", "网格", lambda: None, 44)
         tbtn("分屏", "分屏", lambda: None, 44)
@@ -476,9 +502,10 @@ class RealtimeDetectPage(QWidget):
         self.combo_model.setCurrentText(name)
 
     def set_running(self, running: bool):
-        """同步开始/停止按钮的启用状态和显示文本，避免用户重复启动"""
+        """同步开始/停止按钮的启用状态和显示文本，避免用户重复启动。
+        停止按钮始终保持可用：空闲时点击也能清除预览残留框（用户预期行为）。"""
         self.btn_start.setEnabled(not running)
-        self.btn_stop.setEnabled(running)
+        self.btn_stop.setEnabled(True)
         self.btn_start.setText("● 检测中..." if running else "▶  开始检测")
 
     def _on_preview_roi_edited(self, idx: int, roi: dict):
