@@ -585,51 +585,39 @@ class MainWindow(QMainWindow):
                 pass
         self.page_realtime.set_running(False)
 
-        # 清除预览图上的检测框与 NG 浮窗
-        # 多次清空 + 强制立即重绘 + 延迟安全网，防止任何竞态导致残留
-        try:
-            self.page_realtime.preview.clear_detections()
-            self.page_realtime.preview.repaint()
-        except Exception:
-            pass
-        self.page_realtime.update_detections([])
-        try:
-            self.page_realtime.preview.clear_detections()
-            self.page_realtime.preview.repaint()
-        except Exception:
-            pass
-
-        # 清空右侧当前结果详情，让停止有明确视觉反馈（KPI 累计值保留）
-        self.page_realtime.update_detail(
-            "Product_A_v1", "--", "--", 0, "--",
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            self._local_image_path or "--")
-
-        # 本地图片/下位机图片模式下重新显示原图，确保框被彻底清除
-        if (self._local_image_active or getattr(self, "_nano_image_active", False)) \
-                and self._local_image is not None:
-            rgb = cv2.cvtColor(self._local_image, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            self.page_realtime.update_image(
-                QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
-            tag = "本地图片" if self._local_image_active else "下位机图片"
-            self.status_left.setText(
-                f"{tag}: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
-
-        # 延迟安全网：再清两次，捕获任何延迟到达的信号
-        QTimer.singleShot(50, self._safe_clear_detections)
-        QTimer.singleShot(150, self._safe_clear_detections)
-
-        self.controller.log_message.emit("INFO", "检测", "检测已停止")
-
-    def _safe_clear_detections(self):
-        """停止检测后的安全清框：_detection_paused 期间任何延迟结果都会触发这里"""
-        if getattr(self, "_detection_paused", False):
+        # 内部加载新图时清框（cancel_batch=False）；用户点停止时保留最后一帧结果（cancel_batch=True）
+        if not cancel_batch:
             try:
                 self.page_realtime.preview.clear_detections()
                 self.page_realtime.preview.repaint()
             except Exception:
                 pass
+            self.page_realtime.update_detections([])
+            try:
+                self.page_realtime.preview.clear_detections()
+                self.page_realtime.preview.repaint()
+            except Exception:
+                pass
+            self.page_realtime.update_detail(
+                "Product_A_v1", "--", "--", 0, "--",
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                self._local_image_path or "--")
+            if (self._local_image_active or getattr(self, "_nano_image_active", False)) \
+                    and self._local_image is not None:
+                rgb = cv2.cvtColor(self._local_image, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                self.page_realtime.update_image(
+                    QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+
+        # 用户点停止：保留检测结果（框+详情+KPI），更新状态栏提示
+        if cancel_batch:
+            self.status_left.setText("检测已停止　|　结果保留，可再次检测")
+
+        self.controller.log_message.emit("INFO", "检测", "检测已停止")
+
+    def _safe_clear_detections(self):
+        """（已废弃）停止检测后不再清框，保留最后一帧结果。保留方法避免外部调用崩溃。"""
+        pass
 
     def _on_stream_frame(self, frame):
         self._last_frame = frame
@@ -639,16 +627,8 @@ class MainWindow(QMainWindow):
         self.page_log.set_fps(fps)
 
     def _on_detection_result(self, result: dict):
-        # 用户已点击停止，忽略延迟到达的结果，避免框继续显示
+        # 用户已点击停止，忽略延迟到达的结果（保留最后一帧的检测框不被覆盖）
         if getattr(self, "_detection_paused", False):
-            # 强制清空预览框，避免停止前最后一帧残留
-            try:
-                self.page_realtime.preview.clear_detections()
-                self.page_realtime.preview.repaint()
-                self.controller.log_message.emit(
-                    "DEBUG", "检测", "忽略停止后的延迟检测结果并清框")
-            except Exception:
-                pass
             return
 
         dets = result.get("detections", [])
