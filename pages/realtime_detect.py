@@ -35,6 +35,7 @@ class RealtimeDetectPage(QWidget):
     stop_requested = pyqtSignal()
     save_image_requested = pyqtSignal(str)
     local_image_requested = pyqtSignal()
+    nano_image_detect_requested = pyqtSignal()   # 下位机图片检测
     model_mgr_requested = pyqtSignal()
     load_model_requested = pyqtSignal(str)
     save_path_changed = pyqtSignal(str)
@@ -91,8 +92,31 @@ class RealtimeDetectPage(QWidget):
 
         # 推理源
         self.combo_source = FocusComboBox()
-        self.combo_source.addItems(["PC 本地模型", "Nano 下位机模型"])
+        self.combo_source.addItems(["PC 本地模型", "Nano 下位机模型", "Nano 产线流"])
         card.body.addLayout(form_row("推理源", self.combo_source, 70))
+
+        # 产线流 FPS 控制（仅「Nano 产线流」模式可见）
+        self._stream_fps_row = QWidget()
+        _sfps_lay = QHBoxLayout(self._stream_fps_row)
+        _sfps_lay.setContentsMargins(0, 0, 0, 0)
+        _sfps_lay.setSpacing(8)
+        _lbl_fps = QLabel("产线 FPS:")
+        _lbl_fps.setStyleSheet("color:#cbd5e1; font-size:16px; background:transparent;")
+        _lbl_fps.setFixedWidth(100)
+        self.spin_stream_fps = SpinBox()
+        self.spin_stream_fps.setRange(1, 30)
+        self.spin_stream_fps.setValue(10)
+        self.spin_stream_fps.setFixedWidth(80)
+        self.lbl_stream_state = QLabel("")
+        self.lbl_stream_state.setStyleSheet(
+            "color:#94a3b8; font-size:13px; background:transparent;")
+        _sfps_lay.addWidget(_lbl_fps)
+        _sfps_lay.addWidget(self.spin_stream_fps)
+        _sfps_lay.addWidget(self.lbl_stream_state, 1)
+        _sfps_lay.addStretch()
+        card.body.addWidget(self._stream_fps_row)
+        self._stream_fps_row.setVisible(False)
+        self.combo_source.currentTextChanged.connect(self._on_source_changed)
 
         # 模式提示
         self.lbl_mode_hint = QLabel("单次：一次选择一张图片")
@@ -102,6 +126,13 @@ class RealtimeDetectPage(QWidget):
         card.body.addWidget(self.lbl_mode_hint)
 
         return card
+
+    def _on_source_changed(self, text: str):
+        is_stream = "产线流" in text
+        self._stream_fps_row.setVisible(is_stream)
+        # 产线流模式下隐藏单次/多次选择（连续流不适用）
+        self.seg_mode.setVisible(not is_stream)
+        self.lbl_mode_hint.setVisible(not is_stream)
 
     def _on_mode_changed(self, mode: str):
         """单次/多次切换：更新提示；单次模式下禁用多图导航"""
@@ -251,6 +282,14 @@ class RealtimeDetectPage(QWidget):
         self.btn_save.setFixedHeight(40)
         self.btn_save.clicked.connect(self._on_save_image)
         btn_row2.addWidget(self.btn_local_image)
+        self.btn_nano_image = QPushButton("▣ 下位机图片")
+        self.btn_nano_image.setFixedHeight(40)
+        self.btn_nano_image.setToolTip(
+            "选择下位机(Nano)文件夹中的图片；单次/多次模式控制单选/多选，"
+            "选图后在主界面点「开始检测」，用下位机模型检测")
+        self.btn_nano_image.clicked.connect(
+            lambda: self.nano_image_detect_requested.emit())
+        btn_row2.addWidget(self.btn_nano_image)
         btn_row2.addWidget(self.btn_save)
         left_layout.addLayout(btn_row2)
         
@@ -648,6 +687,19 @@ class RealtimeDetectPage(QWidget):
         else:
             self.lbl_batch_prog.setText(f"批量检测中 {done}/{total} 张...")
             self.lbl_batch_prog.setStyleSheet("color:#22d3ee; font-size:13px; background:transparent;")
+
+    def update_stream_state(self, state: dict):
+        """更新产线流状态标签（由 main._on_stream_state 调用）"""
+        if not state:
+            self.lbl_stream_state.setText("")
+            return
+        fps = state.get("fps", 0)
+        total = state.get("total_frames", 0)
+        ok = state.get("ok_count", 0)
+        ng = state.get("ng_count", 0)
+        avg = state.get("avg_ms", 0)
+        self.lbl_stream_state.setText(
+            f"帧:{total}  OK:{ok}  NG:{ng}  avg:{avg:.0f}ms")
 
     def set_plc_light(self, on: bool):
         self.light_plc_mini.set_status(1 if on else 0, "已连接" if on else "未连接")

@@ -43,6 +43,19 @@ class TCPClient(QObject):
     model_status_received = pyqtSignal(dict)  # model_status（编译进度推送）
     model_delete_received = pyqtSignal(dict)  # model_delete_response
     status_received = pyqtSignal(dict)        # status_response（Nano 系统状态）
+    # 下位机图片检测（2026-08-20 新增）
+    nano_image_dir_received = pyqtSignal(dict)        # nano_image_dir_response
+    nano_images_received = pyqtSignal(dict)           # nano_images_response
+    nano_image_received = pyqtSignal(dict)            # nano_image_response
+    nano_detect_received = pyqtSignal(dict)           # nano_detect_response
+    nano_batch_received = pyqtSignal(dict)            # nano_batch_response / stop_response
+    nano_batch_progress_received = pyqtSignal(dict)   # nano_batch_progress
+    nano_batch_item_received = pyqtSignal(dict)       # nano_batch_item
+    nano_batch_done_received = pyqtSignal(dict)       # nano_batch_done
+    # 产线模拟流（2026-08-25）
+    stream_frame_received   = pyqtSignal(dict)   # stream_frame（下位机主动推送帧）
+    stream_state_received   = pyqtSignal(dict)   # stream_state
+    stream_control_received = pyqtSignal(dict)   # stream_control_response / subscribe_response
 
     def __init__(self):
         super().__init__()
@@ -134,6 +147,53 @@ class TCPClient(QObject):
     def request_status(self):
         """请求下位机系统状态（GPU/CPU/内存/温度/最近推理耗时），响应经 status_received"""
         self._enqueue({"type": "status_request"})
+
+    # ---------- 下位机图片检测（2026-08-20 新增） ----------
+    def request_nano_image_dir(self, action="get", dir=None):
+        """查询/设置下位机图片文件夹，响应经 nano_image_dir_received"""
+        payload = {"type": "nano_image_dir_request", "action": action}
+        if dir:
+            payload["dir"] = dir
+        self._enqueue(payload)
+
+    def request_nano_images(self, offset=0, limit=100, thumb=True, thumb_size=256):
+        """请求下位机图片列表（含缩略图），响应经 nano_images_received"""
+        self._enqueue({"type": "nano_images_request", "offset": offset,
+                       "limit": limit, "thumb": thumb, "thumb_size": thumb_size})
+
+    def request_nano_image(self, name, size=640):
+        """请求单张预览大图（base64），响应经 nano_image_received"""
+        self._enqueue({"type": "nano_image_request", "name": name, "size": size})
+
+    def request_nano_detect(self, name, annotate=True, thumb_size=640):
+        """单张检测：下位机本地图片 + 下位机当前激活模型，响应经 nano_detect_received"""
+        self._enqueue({"type": "nano_detect_request", "name": name,
+                       "annotate": annotate, "thumb_size": thumb_size})
+
+    def start_nano_batch(self, names, rounds=1, annotate=True, thumb_size=640):
+        """启动下位机批量检测（多次检测），进度/条目/完成经 nano_batch_*_received"""
+        self._enqueue({"type": "nano_batch_request", "names": list(names),
+                       "rounds": max(1, int(rounds)), "annotate": annotate,
+                       "thumb_size": thumb_size})
+
+    def stop_nano_batch(self, session_id=None):
+        """中止下位机批量检测"""
+        payload = {"type": "nano_batch_stop_request"}
+        if session_id:
+            payload["session_id"] = session_id
+        self._enqueue(payload)
+
+    # ---------- 产线模拟流（2026-08-25） ----------
+    def subscribe_stream(self, subscribe=True):
+        """订阅/退订产线检测流，响应经 stream_control_received"""
+        self._enqueue({"type": "stream_subscribe_request", "subscribe": bool(subscribe)})
+
+    def control_stream(self, action, fps=None):
+        """控制产线模拟相机（start/stop/set_fps），响应经 stream_control_received"""
+        payload = {"type": "stream_control_request", "action": action}
+        if fps is not None:
+            payload["fps"] = int(fps)
+        self._enqueue(payload)
 
     def upload_model(self, path: str, progress_cb=None):
         """分片上传本地模型到下位机（后台线程执行）。
@@ -355,6 +415,32 @@ class TCPClient(QObject):
                     self.model_delete_received.emit(payload)
                 elif t == "status_response":
                     self.status_received.emit(payload)
+                elif t == "nano_image_dir_response":
+                    self.nano_image_dir_received.emit(payload)
+                elif t == "nano_images_response":
+                    self.nano_images_received.emit(payload)
+                elif t == "nano_image_response":
+                    self.nano_image_received.emit(payload)
+                elif t == "nano_detect_response":
+                    self.nano_detect_received.emit(payload)
+                elif t == "nano_batch_response":
+                    self.nano_batch_received.emit(payload)
+                elif t == "nano_batch_stop_response":
+                    self.nano_batch_received.emit(payload)
+                elif t == "nano_batch_progress":
+                    self.nano_batch_progress_received.emit(payload)
+                elif t == "nano_batch_item":
+                    self.nano_batch_item_received.emit(payload)
+                elif t == "nano_batch_done":
+                    self.nano_batch_done_received.emit(payload)
+                elif t == "stream_subscribe_response":
+                    self.stream_control_received.emit(payload)
+                elif t == "stream_control_response":
+                    self.stream_control_received.emit(payload)
+                elif t == "stream_frame":
+                    self.stream_frame_received.emit(payload)
+                elif t == "stream_state":
+                    self.stream_state_received.emit(payload)
                 elif t == "error":
                     self.error_occurred.emit(payload.get("message", "未知错误"))
                 else:

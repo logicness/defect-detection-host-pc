@@ -86,6 +86,15 @@ class MainWindow(QMainWindow):
         self._batch_queue = []            # 待检测图片路径
         self._current_batch_path = ""     # 当前正在检测的图片
         self._nano_local_pending = ""     # 正在等待 Nano 本地图片结果的路径
+        # 下位机图片检测（2026-08-24）：与本地图片同交互，图片驻留 Nano，走文件名指令
+        self._nano_image_active = False       # 是否处于下位机图片模式
+        self._nano_image_names = []           # 选中的下位机图片文件名（顺序同 _multi_image_paths）
+        self._nano_image_dir = ""             # 下位机图片文件夹
+        self._nano_file_pending = ""          # 正在等待下位机图片检测结果的路径
+        self._nano_wait_preview_detect = ""   # 预览就绪后要自动检测的文件名
+        self._nano_start_pending = False      # 预览未就绪时点开始检测 → 就绪后自动触发
+        self._nano_preview_name = ""          # 当前已显示预览的下位机文件名
+        self._stream_camera_active = False    # 是否处于产线流模式
         # 从配置恢复上次本地模型（必须是存在的 .onnx/.pt 模型文件）
         self._local_model = self.cfg.get("state", {}).get("last_local_model", "")
         if self._local_model and not (
@@ -201,6 +210,7 @@ class MainWindow(QMainWindow):
         self.page_realtime.stop_requested.connect(self._on_stop)
         self.page_realtime.save_image_requested.connect(self._on_save_image)
         self.page_realtime.local_image_requested.connect(self._on_local_image)
+        self.page_realtime.nano_image_detect_requested.connect(self._on_nano_image_detect)
         self.page_realtime.roi_changed.connect(self._on_roi_changed)
         self.page_realtime.load_model_requested.connect(self._on_load_model)
         self.page_realtime.model_mgr_requested.connect(self._on_model_mgr)
@@ -209,6 +219,14 @@ class MainWindow(QMainWindow):
         self.page_realtime.conf_changed.connect(self._on_conf_changed)
         self.page_realtime.prev_image_requested.connect(self._on_nav_prev)
         self.page_realtime.next_image_requested.connect(self._on_nav_next)
+
+        # 下位机图片检测：预览大图 + 单张检测结果回传（2026-08-24）
+        c.tcp.nano_image_received.connect(self._on_nano_preview_image)
+        c.tcp.nano_detect_received.connect(self._on_nano_detect_result)
+
+        # 产线模拟流（2026-08-25）
+        c.tcp.stream_frame_received.connect(self._on_stream_frame)
+        c.tcp.stream_control_received.connect(self._on_stream_control)
 
         # 参数页
         self.page_param.params_apply_requested.connect(self._on_params_apply)
@@ -302,6 +320,17 @@ class MainWindow(QMainWindow):
         # 新一次检测开始时，允许接收推理结果
         self._detection_paused = False
 
+        # 产线模拟流模式：订阅 + 启动产线（下位机自主检测，上位机只接收）
+        if "产线流" in self.page_realtime.get_infer_source():
+            self._on_start_stream_camera()
+            return
+
+        # 下位机图片模式：预览未就绪时挂起，预览回传后自动重入本方法
+        if getattr(self, "_nano_image_active", False) and self._local_image is None:
+            self._nano_start_pending = True
+            self.status_left.setText("下位机图片: 预览加载中，就绪后自动检测...")
+            return
+
         # 已加载本地图片 → 推理（单次/多次）
         if self._local_image is not None:
             if self.stream_engine.is_running:
@@ -359,6 +388,10 @@ class MainWindow(QMainWindow):
         # 确保不跟实时流同时跑
         if self.stream_engine.is_running:
             self.stream_engine.stop()
+        # 下位机图片模式：板端读自己的图片 + 板端当前模型，走 nano_detect_request
+        if getattr(self, "_nano_image_active", False):
+            self._nano_start_detect()
+            return
         path = self._local_image_path
         basename = os.path.basename(path)
 
@@ -516,10 +549,14 @@ class MainWindow(QMainWindow):
         # 避免延迟结果继续翻页或画框
         if cancel_batch:
             was_batch = (getattr(self, "_batch_running", False)
-                         or bool(self._batch_queue) or bool(self._nano_local_pending))
+                         or bool(self._batch_queue) or bool(self._nano_local_pending)
+                         or bool(getattr(self, "_nano_file_pending", "")))
             self._batch_running = False
             self._batch_queue = []
             self._nano_local_pending = ""
+            self._nano_file_pending = ""
+            self._nano_wait_preview_detect = ""
+            self._nano_start_pending = False
             if was_batch:
                 done = len(self._multi_results)
                 total = len(self._multi_image_paths)
@@ -529,6 +566,15 @@ class MainWindow(QMainWindow):
                 self.page_realtime.lbl_batch_prog.setStyleSheet(
                     "color:#f59e0b; font-size:13px; background:transparent;")
                 self.page_realtime.bar_batch.setVisible(False)
+        # 产线模拟流：发 stop 指令（保留订阅，可重启）
+        if getattr(self, "_stream_camera_active", False):
+            try:
+                self.controller.tcp.control_stream("stop")
+            except Exception:
+                pass
+            self._stream_camera_active = False
+            self.controller.log_message.emit("INFO", "检测", "产线模拟已停止")
+
         if self.stream_engine.is_running:
             self.stream_engine.stop()
         eng = getattr(self, "_local_infer_engine", None)
@@ -559,14 +605,16 @@ class MainWindow(QMainWindow):
             time.strftime("%Y-%m-%d %H:%M:%S"),
             self._local_image_path or "--")
 
-        # 本地图片模式下重新显示原图，确保框被彻底清除
-        if self._local_image_active and self._local_image is not None:
+        # 本地图片/下位机图片模式下重新显示原图，确保框被彻底清除
+        if (self._local_image_active or getattr(self, "_nano_image_active", False)) \
+                and self._local_image is not None:
             rgb = cv2.cvtColor(self._local_image, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
             self.page_realtime.update_image(
                 QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+            tag = "本地图片" if self._local_image_active else "下位机图片"
             self.status_left.setText(
-                f"本地图片: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
+                f"{tag}: {os.path.basename(self._local_image_path)}　|　已停止，可再次检测")
 
         # 延迟安全网：再清两次，捕获任何延迟到达的信号
         QTimer.singleShot(50, self._safe_clear_detections)
@@ -675,6 +723,18 @@ class MainWindow(QMainWindow):
             else:
                 self.status_left.setText(
                     f"本地图片: {os.path.basename(path)}　| Nano 检测完成")
+        # 下位机图片检测结果：存结果并继续下一张（批量）或更新状态（单张）
+        if self._nano_file_pending:
+            path = self._nano_file_pending
+            self._nano_file_pending = ""
+            self._multi_results[path] = {"dets": list(dets), "ms": 0}
+            if self._batch_running:
+                self.page_realtime.update_batch_progress(
+                    len(self._multi_results), len(self._multi_image_paths))
+                self._batch_next()
+            else:
+                self.status_left.setText(
+                    f"下位机图片: {os.path.basename(path)}　| Nano 检测完成")
 
     def _on_ng_alarm(self, count):
         self.controller.log_message.emit(
@@ -1134,11 +1194,14 @@ class MainWindow(QMainWindow):
             " font-size: 15px; padding: 4px; }"
             "QMenu::item { padding: 8px 24px; border-radius: 4px; }"
             "QMenu::item:selected { background-color: #2563eb; color: #ffffff; }")
+        act_nano = menu.addAction("下位机图片检测")
         act_model = menu.addAction("模型管理")
         menu.addSeparator()
         act_about = menu.addAction("关于")
         act = menu.exec_(self.title_bar.mapToGlobal(self._menu_pos()))
-        if act == act_model:
+        if act == act_nano:
+            self._on_nano_image_detect()
+        elif act == act_model:
             self._on_model_mgr()
         elif act == act_about:
             QMessageBox.about(self, "关于",
@@ -1152,9 +1215,184 @@ class MainWindow(QMainWindow):
         return self.title_bar.rect().topRight() - self.title_bar.rect().topLeft() \
             + self.title_bar.pos()
 
+    # ================= 下位机图片检测（2026-08-24，与本地图片同交互） =================
+    def _nano_path_of(self, name: str) -> str:
+        return f"nano://{self._nano_image_dir}/{name}"
+
+    @staticmethod
+    def _nano_name_of(path: str) -> str:
+        return os.path.basename(str(path or "").replace("\\", "/"))
+
+    def _nano_load_preview_by_name(self, name: str):
+        """拉取下位机图片预览大图（640px）显示到主界面预览区"""
+        self.status_left.setText(f"下位机图片: {name}　| 加载预览中...")
+        self.controller.tcp.request_nano_image(name, 640)
+
+    def _nano_load_preview(self, path: str):
+        """按 nano:// 路径加载预览（对齐 _load_image_file 的入口语义）"""
+        name = self._nano_name_of(path)
+        if path in self._multi_image_paths:
+            self._nano_image_idx = self._multi_image_paths.index(path)
+        self._nano_load_preview_by_name(name)
+
+    def _nano_start_detect(self):
+        """单帧检测：对当前浏览的下位机图片发起检测"""
+        if not self._nano_image_names:
+            return
+        idx = max(0, min(self._nano_image_idx, len(self._nano_image_names) - 1))
+        self._nano_start_detect_for(self._nano_image_names[idx])
+
+    def _nano_start_detect_for(self, name: str):
+        """发起下位机图片检测：预览帧已在手直接发；否则先拉预览，就绪后自动发"""
+        if self._nano_preview_name == name and self._local_image is not None:
+            self.controller.tcp.request_nano_detect(name, annotate=False)
+            return
+        self._nano_wait_preview_detect = name
+        self._nano_load_preview_by_name(name)
+
+    def _batch_next_nano(self, path: str):
+        """批量流程：下位机图片走 预览→检测 链路（不读本地文件）"""
+        self._detection_paused = False
+        self.page_realtime.update_nav(self._multi_image_idx, len(self._multi_image_paths))
+        self.page_realtime.set_running(True)
+        self.page_realtime.update_batch_progress(
+            len(self._multi_results), len(self._multi_image_paths))
+        name = self._nano_name_of(path)
+        if not self.controller.tcp.is_connected:
+            self._multi_results[path] = {"dets": [], "ms": 0}
+            self._batch_next()
+            return
+        self.controller.log_message.emit(
+            "INFO", "检测",
+            f"下位机图片检测 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}]: {name}")
+        self.status_left.setText(
+            f"批量检测 [{self._multi_image_idx+1}/{len(self._multi_image_paths)}] 下位机图片推理中...")
+        # 先拉预览显示新图，预览就绪后自动续发检测（批量中逐张动态切换）
+        self._nano_wait_preview_detect = name
+        self._nano_load_preview_by_name(name)
+
+    def _update_detail_for_path(self, path: str):
+        """用 _multi_results 更新右侧详情表：缺陷类型汇总（同类显示 ×数量）+ 最大框信息"""
+        r = self._multi_results.get(path, {})
+        dets = r.get("dets", [])
+        verdict = "NG" if dets else "OK"
+        if dets:
+            from collections import Counter
+            cnt = Counter(d[0] for d in dets)
+            type_str = ", ".join(f"{cls} ×{n}" for cls, n in cnt.items())
+            biggest = max(dets, key=lambda d: abs((d[4] - d[2]) * (d[5] - d[3])))
+            area = int(abs((biggest[4] - biggest[2]) * (biggest[5] - biggest[3])))
+            conf = f"{biggest[1]:.2f}"
+        else:
+            type_str, area, conf = "-", 0, "--"
+        self.page_realtime.update_detail(
+            "Product_A_v1", verdict, type_str, area, conf,
+            time.strftime("%Y-%m-%d %H:%M:%S"), path or "--")
+
+    def _on_nano_preview_image(self, msg: dict):
+        """下位机图片预览回传：显示原图（对齐本地图片加载）；等待检测时自动续发"""
+        if not getattr(self, "_nano_image_active", False):
+            return
+        name = msg.get("name", "")
+        if not msg.get("ok"):
+            if self._nano_wait_preview_detect == name:
+                self._nano_wait_preview_detect = ""
+                path = self._nano_path_of(name)
+                self._multi_results[path] = {"dets": [], "ms": 0,
+                                             "error": msg.get("error", "")}
+                self.status_left.setText(
+                    f"下位机图片: {name}　| 预览失败 {msg.get('error', '')}")
+                if self._batch_running:
+                    self.page_realtime.update_batch_progress(
+                        len(self._multi_results), len(self._multi_image_paths))
+                    self._batch_next()
+            else:
+                self.status_left.setText(
+                    f"下位机图片预览失败: {msg.get('error', '')}")
+            return
+        import base64
+        import numpy as np
+        raw = base64.b64decode(msg["image_b64"])
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        self._nano_preview_name = name
+        self._local_image = img
+        self._local_image_path = self._nano_path_of(name)
+        self._local_image_active = True
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        self.page_realtime.update_image(
+            QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+        path = self._local_image_path
+        if path in self._multi_results:
+            r = self._multi_results[path]
+            self.page_realtime.update_detections(r.get("dets", []))
+            self._update_detail_for_path(path)
+            self.status_left.setText(
+                f"下位机图片: {name}　| 检测完成 {r.get('ms', 0):.0f} ms")
+        else:
+            self.page_realtime.update_detections([])
+            self.status_left.setText(f"下位机图片: {name}　| 点击开始检测")
+        self.page_realtime.update_nav(self._nano_image_idx, len(self._multi_image_paths))
+        # 预览就绪 → 自动续发等待中的检测
+        if self._nano_wait_preview_detect == name:
+            self._nano_wait_preview_detect = ""
+            self.controller.tcp.request_nano_detect(name, annotate=False)
+        # 开始检测时预览未就绪 → 就绪后自动重入 _on_start
+        if getattr(self, "_nano_start_pending", False):
+            self._nano_start_pending = False
+            self._on_start()
+
+    def _on_nano_detect_result(self, msg: dict):
+        """下位机图片单张检测结果（nano_detect_response）：入管线 + 批量续接"""
+        if getattr(self, "_detection_paused", False):
+            return
+        if not getattr(self, "_nano_image_active", False):
+            return
+        name = msg.get("name", "")
+        path = self._nano_path_of(name)
+        if not msg.get("ok"):
+            self._multi_results[path] = {"dets": [], "ms": 0,
+                                         "error": msg.get("error", "")}
+            self.status_left.setText(f"下位机图片: {name}　| 检测失败 {msg.get('error', '')}")
+            if self._batch_running:
+                self.page_realtime.update_batch_progress(
+                    len(self._multi_results), len(self._multi_image_paths))
+                self._batch_next()
+            return
+        from core.class_names import resolve_class_names, class_name_of
+        class_names = resolve_class_names(self.controller.nano_model_name)
+        dets = []
+        for d in msg.get("detections", []):
+            box = d.get("box", [0, 0, 0, 0]) or [0, 0, 0, 0]
+            b = []
+            for v in box[:4]:
+                try:
+                    b.append(float(v))
+                except (TypeError, ValueError):
+                    b.append(0.0)
+            while len(b) < 4:
+                b.append(0.0)
+            cid = d.get("class_id", 0)
+            cls = class_name_of(class_names, cid)
+            dets.append((cls, float(d.get("confidence", 0) or 0), *b))
+        try:
+            ms = float(msg.get("timing", {}).get("total_with_read", 0) or 0)
+        except (TypeError, ValueError):
+            ms = 0.0
+        # 统一结果管线：预览/KPI/写库/历史/批量续接 由 _on_detection_result 完成
+        self._nano_file_pending = path
+        self.controller.ingest_result(dets, self._local_image, path)
+        if not self._batch_running:
+            self.status_left.setText(f"下位机图片: {name}　| 检测完成 {ms:.0f} ms")
+
     def _on_local_image(self):
         """本地图片：单次模式选一张，多次模式可选多张。
         选好后直接显示在实时预览区，不弹窗。"""
+        # 切换到本地图片模式：退出下位机图片模式
+        self._nano_image_active = False
+        self._nano_image_names = []
         last_dir = self.cfg.get("state", {}).get("last_image_dir", "")
         start_dir = ""
         if self._local_model:
@@ -1261,6 +1499,10 @@ class MainWindow(QMainWindow):
         self._current_batch_path = path
         if path in self._multi_image_paths:
             self._multi_image_idx = self._multi_image_paths.index(path)
+        # 下位机图片模式：不读本地文件，走 预览→检测 链路
+        if getattr(self, "_nano_image_active", False):
+            self._batch_next_nano(path)
+            return
         self._load_image_file(path)
         # ⚠️ 关键：_load_image_file 内部调了 _on_stop() 会设 _detection_paused=True，
         # 必须在这里重置为 False，否则推理结果回来时会被忽略，批量检测卡住
@@ -1319,6 +1561,12 @@ class MainWindow(QMainWindow):
             return
         path = paths[idx]
         self._multi_image_idx = idx
+        # 下位机图片模式：异步拉预览，回传时自动套用已存结果
+        if getattr(self, "_nano_image_active", False):
+            self._nano_image_idx = idx
+            self._nano_load_preview(path)
+            self.page_realtime.update_nav(idx, len(paths))
+            return
         # 直接加载图片显示，不调 _load_image_file（它会触发 _on_stop 清框）
         import numpy as np
         try:
@@ -1342,12 +1590,7 @@ class MainWindow(QMainWindow):
             r = self._multi_results[path]
             dets = r.get("dets", [])
             self.page_realtime.update_detections(dets)
-            self.page_realtime.update_detail(
-                "Product_A_v1", "NG" if dets else "OK",
-                (dets[0][0] if dets else "-"),
-                int(abs((dets[0][4]-dets[0][2])*(dets[0][5]-dets[0][3]))) if dets else 0,
-                f"{dets[0][1]:.2f}" if dets else "--",
-                time.strftime("%Y-%m-%d %H:%M:%S"), path)
+            self._update_detail_for_path(path)
             ms = r.get("ms", 0)
             self.status_left.setText(f"多图检测 [{idx+1}/{len(paths)}] {os.path.basename(path)}　| {ms:.0f}ms")
         else:
@@ -1380,6 +1623,149 @@ class MainWindow(QMainWindow):
         )
         dlg.result_committed.connect(self._on_batch_result)
         dlg.exec_()
+
+    # ================= 产线模拟流（2026-08-25） =================
+    def _on_start_stream_camera(self):
+        """开始产线模拟流：订阅 + start + FPS"""
+        if not self.controller.tcp.is_connected:
+            self.controller.log_message.emit(
+                "WARN", "检测", "产线流需要连接 Nano，请先「重新连接」")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "产线模拟", "下位机未连接，请先「重新连接」。")
+            return
+        fps = self.page_realtime.spin_stream_fps.value()
+        self._stream_camera_active = True
+        self._detection_paused = False
+        self.page_realtime.set_running(True)
+        self.controller.tcp.subscribe_stream(True)
+        self.controller.tcp.control_stream("start", fps=fps)
+        self.controller.log_message.emit(
+            "INFO", "检测", f"产线模拟启动: {fps} FPS，下位机自主检测中...")
+        self.status_left.setText(f"产线模拟运行中　|　{fps} FPS　|　等待下位机推帧...")
+
+    def _on_stream_frame(self, msg: dict):
+        """产线流帧回传：显示标注图 → 入管线（KPI/NG/归档/历史）"""
+        if getattr(self, "_detection_paused", False):
+            return
+        if not getattr(self, "_stream_camera_active", False):
+            return
+        import base64
+        import numpy as np
+        name = msg.get("name", "")
+        seq = msg.get("seq", 0)
+        dets_raw = msg.get("detections", [])
+        # 标注图解码（已有框+标签，直接显示避免双框）
+        frame = None
+        if msg.get("annot_b64"):
+            raw = base64.b64decode(msg["annot_b64"])
+            frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        self.page_realtime.update_image(
+            QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy())
+        # detections → UI 格式
+        from core.class_names import resolve_class_names, class_name_of
+        class_names = resolve_class_names(self.controller.nano_model_name)
+        dets = []
+        for d in dets_raw:
+            box = d.get("box", [0, 0, 0, 0]) or [0, 0, 0, 0]
+            b = []
+            for v in box[:4]:
+                try:
+                    b.append(float(v))
+                except (TypeError, ValueError):
+                    b.append(0.0)
+            while len(b) < 4:
+                b.append(0.0)
+            cid = d.get("class_id", 0)
+            cls = class_name_of(class_names, cid)
+            dets.append((cls, float(d.get("confidence", 0) or 0), *b))
+        self.page_realtime.update_detections(dets)
+        # 详情表（Counter ×数量）
+        path = f"stream://{name}"
+        verdict = "NG" if dets else "OK"
+        if dets:
+            from collections import Counter
+            cnt = Counter(d[0] for d in dets)
+            type_str = ", ".join(f"{c} ×{n}" for c, n in cnt.items())
+            biggest = max(dets, key=lambda dd: abs((dd[4]-dd[2])*(dd[5]-dd[3])))
+            area = int(abs((biggest[4]-biggest[2])*(biggest[5]-biggest[3])))
+            conf = f"{biggest[1]:.2f}"
+        else:
+            type_str, area, conf = "-", 0, "--"
+        self.page_realtime.update_detail(
+            "Product_A_v1", verdict, type_str, area, conf,
+            time.strftime("%Y-%m-%d %H:%M:%S"), path)
+        # 入管线（KPI/写库/NG 归档/PLC 剔除/历史）
+        self.controller.ingest_result(dets, frame, path)
+        ms = msg.get("timing", {}).get("total_with_read", 0)
+        self.status_left.setText(
+            f"产线流 #{seq} {name}　| {'NG ×'+str(len(dets)) if dets else 'OK'} {ms:.0f}ms")
+
+    def _on_stream_control(self, msg: dict):
+        """产线流控制/订阅/状态响应"""
+        if msg.get("type") == "stream_subscribe_response":
+            if msg.get("ok"):
+                self.page_realtime.update_stream_state(msg)
+            return
+        if msg.get("type") == "stream_control_response":
+            action = msg.get("action", "")
+            if action == "start" and msg.get("ok"):
+                self.page_realtime.update_stream_state(msg)
+                fps = msg.get("fps", 0)
+                self.controller.log_message.emit(
+                    "INFO", "检测", f"产线模拟已启动: {fps} FPS")
+            elif action == "stop":
+                self.page_realtime.update_stream_state({})
+                self.controller.log_message.emit("INFO", "检测", "产线模拟已停止")
+            elif action == "set_fps":
+                self.page_realtime.update_stream_state(msg)
+
+    def _on_nano_image_detect(self):
+        """「下位机图片」入口：弹出下位机图片选择器（与本地图片同交互）。
+        单次/多次模式控制单选/多选；选图后主界面预览，点「开始检测」触发检测。"""
+        if not self.controller.tcp.is_connected:
+            self.controller.log_message.emit(
+                "WARN", "检测", "下位机图片检测需要连接 Nano，请先「重新连接」")
+            if QApplication.platformName() != "offscreen":
+                QMessageBox.information(
+                    self, "下位机图片",
+                    "下位机（Nano）未连接。\n\n"
+                    "请先点击「重新连接」连上下位机，\n"
+                    "再选择下位机图片。")
+            return
+        if self.stream_engine.is_running:
+            self._on_stop()
+        from PyQt5.QtWidgets import QDialog
+        from components.nano_image_picker import NanoImagePickerDialog
+        multi = self.page_realtime.get_detect_mode() == "多次检测"
+        dlg = NanoImagePickerDialog(
+            tcp_client=self.controller.tcp, multi=multi, parent=self,
+            default_dir=self.cfg.get("state", {}).get("last_nano_image_dir", ""))
+        if dlg.exec_() != QDialog.Accepted or not dlg.selected_names:
+            return
+        names = list(dlg.selected_names)
+        self._nano_image_dir = dlg.image_dir or self._nano_image_dir
+        self._nano_image_names = names
+        self._nano_image_active = True
+        self._nano_image_idx = 0
+        self._nano_file_pending = ""
+        self._nano_wait_preview_detect = ""
+        self._nano_start_pending = False
+        self._multi_image_paths = [self._nano_path_of(n) for n in names]
+        self._multi_image_idx = 0
+        self._multi_results.clear()
+        self._on_stop()
+        self._save_state(last_nano_image_dir=self._nano_image_dir)
+        self._nano_load_preview(self._multi_image_paths[0])
+        self.page_realtime.update_nav(0, len(names))
+        label = f"Nano 下位机（{'多图 ' + str(len(names)) + ' 张' if len(names) > 1 else '单图'}）"
+        self.page_realtime.set_source(label, "#22d3ee")
+        self.controller.log_message.emit(
+            "INFO", "检测", f"已选择下位机图片 {len(names)} 张，点击「开始检测」检测")
 
     def _on_batch_result(self, data: dict):
         """批量检测结果回传：进入主流程（KPI / 历史 / 数据库）"""

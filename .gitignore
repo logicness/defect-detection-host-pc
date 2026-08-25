@@ -22,3 +22,5 @@ crash.log
 
 # 测试临时
 *.log
+
+data/host_config.json

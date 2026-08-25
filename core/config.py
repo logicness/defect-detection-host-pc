@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
         "last_image_dir": "",        # 上次图片选择目录
         "last_model_dir": "",        # 上次模型选择目录
         "last_nano_model": "",       # 上次 Nano 激活模型名
+        "last_nano_image_dir": "",   # 上次下位机图片文件夹
     },
     "rois": [
         {"name": "ROI 1", "enabled": False, "x": 120, "y": 120, "w": 420, "h": 420},

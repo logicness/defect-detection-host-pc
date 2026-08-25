@@ -63,6 +63,15 @@ UI 严格按 5 张设计稿实现：实时检测 / 参数设置 / 历史记录 /
   支持 PC 本地模型（.onnx/.pt，onnxruntime/ultralytics）与 Nano 推理（TCP 回传）；
   推理走 `core/local_infer.LocalInferEngine` 后台线程异步执行（对齐 Nano「模型管理→本地检测」），
   不阻塞 UI；无有效本地模型/未连下位机时明确弹窗提示，不再用模拟框冒充结果
+- **下位机图片检测（v1.6 新增）**：点「▣ 下位机图片」→ 弹出下位机图片选择器（Nano 固定
+  文件夹 `images/input` 的缩略图网格，单选/多选由「单次/多次检测」模式决定）→ 主界面
+  预览 → 点「开始检测」由下位机用当前模型检测（`nano_detect_request`，图片不回传）→
+  结果入统一管线（KPI/写库/历史/NG 归档），路径记 `nano://` 前缀；翻页详情随图更新
+  （缺陷类型 `×数量` Counter 汇总）；批量自动逐张「预览→检测」续接，停止/重复检测正常
+- **产线模拟流（v1.6 新增）**：推理源选「Nano 产线流」→ 点开始检测 → 上位机订阅下位机
+  产线模拟流 → 下位机用 `images/input` 图片按 FPS 节拍模拟相机采集 + 独立检测 →
+  `stream_frame` 主动推送标注图+检测框 → 上位机实时显示 + KPI/NG 浮窗/PLC 剔除/归档/历史。
+  贴合真实产线架构（下位机自主检测，上位机只监视），FPS 1-30 可调
 - **产线联动**：NG 自动 PLC 剔除（产线运行中才剔除）/ 连续 NG 告警（阈值 50，弹窗+日志+冷却防刷屏）/
   NG 图片异步归档（原图+标注图+CSV）/ 低置信案例归档
 - 暗色主题（16px 字号体系）、无边框窗口、**默认最大化启动**、边缘拖拽缩放、
@@ -129,7 +138,8 @@ Host PC/
 │   ├── model_manager_dialog.py  # 模型管理对话框（双 Tab：选择模型 + 模型管理）
 │   ├── model_library.py     # 模型库持久化 + 质量评分
 │   ├── model_info.py        # 数据集/类别/预训练/推荐标记识别
-│   └── local_image_detect.py    # 本地图片检测对话框（选图→推理→标注→保存）
+│   ├── local_image_detect.py    # 本地图片检测对话框（选图→推理→标注→保存）
+│   └── nano_image_picker.py     # 下位机图片选择器（缩略图网格，单选/多选）
 ├── pages/                   # 5 个页面（对应 5 张设计稿）
 ├── assets/qss/dark_theme.qss
 ├── tools/
@@ -138,7 +148,10 @@ Host PC/
 │   ├── plc_sim.py           # Modbus 模拟器
 │   ├── test_model_mgr.py    # 模型管理回归测试（23 断言）
 │   ├── test_no_sim_start.py # 无模拟检测回归测试（6 断言）
-│   └── smoke_test.py        # 冒烟测试（8 项）
+│   ├── smoke_test.py        # 冒烟测试（8 项）
+│   ├── nano_images_test.py  # 下位机图片检测对话框级测试（13 断言，需 Nano 在线）
+│   ├── nano_mainflow_test.py# 下位机图片检测主流程测试（15 断言，需 Nano 在线）
+│   └── run_all_tests.py     # 一键回归（以上 6 项，offscreen 子进程隔离）
 ├── data/                    # 运行时数据（db/配置，自动创建）
 ├── 启动上位机.bat / .vbs
 └── requirements.txt
@@ -149,13 +162,26 @@ Host PC/
 **TCP（下位机推理）**：4 字节大端长度头 + UTF-8 JSON。
 消息类型：`detect_request`(image_base64) / `detect_response`(detections) /
 `heartbeat`+`heartbeat_ack` / `control`(conf_thres/iou_thres/rois) /
-`model_list_request` / `model_load_request` / `model_upload_*` / `model_delete_request`。
+`model_list_request` / `model_load_request` / `model_upload_*` / `model_delete_request` /
+`nano_image_dir_request` / `nano_images_request` / `nano_image_request` /
+`nano_detect_request` / `nano_batch_request` / `nano_batch_stop_request` /
+`stream_subscribe_request` / `stream_control_request` /
+`stream_frame`（主动推送）/ `stream_state`。
 
 **Modbus TCP（PLC）**：MBAP 头 + PDU。功能码 0x01/0x03/0x05。
 地址映射：线圈 0=产线运行 1=故障 2=剔除触发(写) 3=剔除确认；寄存器 0=合格计数 1=缺陷计数。
 
 ## 版本历史
 
+- **v1.6（2026-08-25）**：下位机图片检测 + 产线模拟流。
+  - 新增「▣ 下位机图片」入口：弹出 `NanoImagePickerDialog` 选择器（缩略图网格+单选/多选），
+    主界面预览→开始检测→下位机用当前模型检测自己的图片→结果回传（`nano_detect_request`），
+    翻页详情随图更新，缺陷类型统一 Counter 汇总（`×数量`格式）
+  - 新增「Nano 产线流」推理源：下位机 `images/input` 图片按 FPS 节拍模拟相机采集 + 独立检测，
+    `stream_frame` 主动推送标注图+检测框，上位机实时显示+KPI/NG/归档/历史
+  - `tcp_client.py` 扩展：nano_image/detect/batch 8 信号+6 方法 + stream 3 信号+2 方法
+  - 板端部署 64 张测试图（NEU/SDX/SD10/MVIT产线/广东铝，57/64 检出）+ 产线流协议自检通过
+  - 回归测试：`tools/nano_mainflow_test.py` 15/15 + `test_stream_ui_realboard.py` 13/13
 - **v1.5（2026-08-13）**：重新连接提示精简 + 停止清框 + 检测框清晰度。
   - 重新连接提示改为仅右下角运行日志显示（不再弹窗），保留连接成功弹窗（10 秒去重）
   - 停止检测彻底清框：`_detection_paused` 标志忽略延迟到达的推理结果 +
