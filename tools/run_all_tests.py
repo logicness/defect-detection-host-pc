@@ -29,6 +29,8 @@ TESTS = [
     # 下位机图片检测（2026-08-24 新增；需 Nano 在线，离线仅告警）
     ("tools/nano_images_test.py",  "下位机图片检测（缩略图/批量/停止）", 150, True),
     ("tools/nano_mainflow_test.py", "下位机图片检测主流程（选图/单帧/批量）", 180, True),
+    # 产线模拟流（2026-08-25 新增；需 Nano 在线，离线仅告警）
+    ("tools/nano_stream_test.py",  "产线模拟流（subscribe/收帧/停止）", 120, True),
 ]
 
 
