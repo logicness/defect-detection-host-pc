@@ -26,6 +26,9 @@ TESTS = [
     ("tools/test_model_mgr.py",    "模型管理 v3 全功能", 60, False),
     # 通信调试（需 Nano 在线；离线时失败仅告警不阻断）
     ("tools/debug_comm_test.py",   "TCP 心跳/模型列表/推理", 60, True),
+    # 下位机图片检测（2026-08-24 新增；需 Nano 在线，离线仅告警）
+    ("tools/nano_images_test.py",  "下位机图片检测（缩略图/批量/停止）", 150, True),
+    ("tools/nano_mainflow_test.py", "下位机图片检测主流程（选图/单帧/批量）", 180, True),
 ]
 
 
