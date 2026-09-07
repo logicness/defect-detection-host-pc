@@ -1,26 +1,8 @@
-# 打包产物
-build/
-dist/
-*.spec.bak
-
-# Python
 __pycache__/
 *.pyc
-*.pyo
-
-# 本地数据
-data/alarm_config.json
-data/cred_check.txt
-data/*.db
-data/tcp_debug.log
-crash.log
-
-# 工作区/Agent 产物
-.design/
+build/
+dist/
 .workbuddy/
-.dsh-trash/
-
-# 测试临时
-*.log
-
-data/host_config.json
+data/cred_check.txt
+*.tmpdir/
+.vscode/
