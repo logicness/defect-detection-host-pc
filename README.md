@@ -33,9 +33,6 @@ pip install -r requirements.txt
 
 # Launch the application
 python main.py
-
-# Or use the launcher (no console window)
-# Double-click: 启动上位机.vbs
 ```
 
 ## Project Structure
@@ -57,10 +54,11 @@ python main.py
 │   └── stats_charts.py              # Trend and distribution charts
 ├── pages/                            # 5 tab pages (Detection, Settings, History, Comm, Logs)
 ├── assets/qss/dark_theme.qss         # Dark theme stylesheet
-├── tools/                            # Utilities (auto-scan, demo data, PLC simulator, tests)
 ├── data/                             # Runtime data (auto-created)
 └── requirements.txt
 ```
+
+> **Not included:** Test suites, demo data generators, PLC simulator, and PyInstaller packaging config are available in the private companion repository.
 
 ## Communication Protocol
 
