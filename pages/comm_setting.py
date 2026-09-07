@@ -73,7 +73,7 @@ class CommSettingPage(QWidget):
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.combo_proto = FocusComboBox()
         self.combo_proto.addItems(["Modbus TCP"])
-        self.edit_ip = QLineEdit("192.168.1.200")
+        self.edit_ip = QLineEdit("<PLC_LAN_IP>")
         self.spin_port = SpinBox()
         self.spin_port.setRange(1, 65535)
         self.spin_port.setValue(2000)
@@ -247,7 +247,7 @@ class CommSettingPage(QWidget):
     def apply_config(self, cfg: dict):
         p = cfg.get("plc", {})
         if p:
-            self.edit_ip.setText(p.get("host", "192.168.1.200"))
+            self.edit_ip.setText(p.get("host", "<PLC_LAN_IP>"))
             self.spin_port.setValue(p.get("port", 2000))
             self.spin_unit.setValue(p.get("unit_id", 1))
             self.spin_timeout.setValue(p.get("timeout_ms", 3000))

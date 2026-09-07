@@ -300,7 +300,7 @@ class MainWindow(QMainWindow):
         """启动时自动连接 PLC；TCP 改为手动连接，避免未开机时持续重试卡进程"""
         t = self.cfg.get("tcp", {})
         self.controller.configure_tcp(
-            t.get("host", "192.168.1.101"), t.get("port", 8888),
+            t.get("host", "<NANO_LAN_IP>"), t.get("port", 8888),
             heartbeat=t.get("heartbeat", 5), retries=t.get("retries", 3),
             timeout=t.get("timeout", 10))
         # TCP 不再自动连接：用户点击「重新连接」/模型管理「重新连接」时才连
@@ -1109,7 +1109,7 @@ class MainWindow(QMainWindow):
         """手动重新连接下位机推理服务（断开旧线程后立即重连）"""
         self.controller.tcp.disconnect()
         t = self.cfg.get("tcp", {})
-        host = t.get("host", "192.168.1.101")
+        host = t.get("host", "<NANO_LAN_IP>")
         port = t.get("port", 8888)
         self.controller.configure_tcp(
             host, port,

@@ -445,7 +445,7 @@ class RealtimeDetectPage(QWidget):
         pl.setContentsMargins(6, 6, 6, 6)
         self.combo_proto = FocusComboBox()
         self.combo_proto.addItems(["Modbus TCP"])
-        self.edit_plc_ip = QLineEdit("192.168.1.200")
+        self.edit_plc_ip = QLineEdit("<PLC_LAN_IP>")
         self.spin_plc_port = SpinBox()
         self.spin_plc_port.setRange(1, 65535)
         self.spin_plc_port.setValue(2000)

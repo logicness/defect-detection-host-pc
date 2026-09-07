@@ -38,7 +38,7 @@ class PLCClient(QObject):
         self._tx = self._rx = self._err = 0
         self._txid = 0
 
-        self.host = "192.168.1.200"
+        self.host = "<PLC_LAN_IP>"
         self.port = 2000
         self.unit_id = 1
         self.timeout = 3.0

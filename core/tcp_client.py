@@ -68,7 +68,7 @@ class TCPClient(QObject):
         self._last_recv = 0.0
         self._epoch = 0  # 连接代际：每次连接递增，旧线程据此退出
 
-        self.host = "192.168.1.101"
+        self.host = "<NANO_LAN_IP>"
         self.port = 8888
         self.heartbeat_interval = 5
         self.max_retries = 3

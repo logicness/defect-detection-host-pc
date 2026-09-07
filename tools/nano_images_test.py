@@ -17,7 +17,7 @@ from core.tcp_client import TCPClient
 app = QApplication([])
 
 t = TCPClient()
-t.configure("192.168.1.101", 8888)
+t.configure("<NANO_LAN_IP>", 8888)
 connected = [False]
 t.connected.connect(lambda: connected.__setitem__(0, True))
 

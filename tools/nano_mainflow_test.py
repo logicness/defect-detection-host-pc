@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""上位机「下位机图片」交互 全流程回归测试（需 Nano 在线 192.168.1.101）
+"""上位机「下位机图片」交互 全流程回归测试（需 Nano 在线 <NANO_LAN_IP>）
 用法（拷入 Host PC/tools/ 后）:
     python tools/nano_mainflow_test.py          # 默认仓库根（本文件上一级）
     python tools/nano_mainflow_test.py <DIR>    # 指定 Host PC 根目录
@@ -64,7 +64,7 @@ import main as mainmod
 mw = mainmod.MainWindow()
 mw.show()
 
-mw.controller.tcp.configure("192.168.1.101", 8888)
+mw.controller.tcp.configure("<NANO_LAN_IP>", 8888)
 connected = [False]
 mw.controller.tcp.connected.connect(lambda: connected.__setitem__(0, True))
 mw.controller.tcp.connect()

@@ -55,7 +55,7 @@ mw = mainmod.MainWindow()
 mw.show()
 
 # 连接
-mw.controller.tcp.configure("192.168.1.101", 8888)
+mw.controller.tcp.configure("<NANO_LAN_IP>", 8888)
 connected = [False]
 mw.controller.tcp.connected.connect(lambda: connected.__setitem__(0, True))
 mw.controller.tcp.connect()

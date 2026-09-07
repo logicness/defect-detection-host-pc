@@ -441,7 +441,7 @@ class ModelManagerDialog(QDialog):
             self.lbl_status.setStyleSheet(
                 "color:#22c55e; font-size:17px; background:transparent;")
         else:
-            host = getattr(self.tcp, "host", "192.168.1.101")
+            host = getattr(self.tcp, "host", "<NANO_LAN_IP>")
             port = getattr(self.tcp, "port", 8888)
             self.lbl_status.setText(
                 f"推理源：下位机未连接（{host}:{port}），可选用本地模型")

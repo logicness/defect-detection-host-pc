@@ -13,7 +13,7 @@ import time
 sys.path.insert(0, r"D:\RK3568&Orin Nano\ORIN NANO\Host PC")
 from core.class_names import resolve_class_names
 
-HOST = "192.168.1.101"
+HOST = "<NANO_LAN_IP>"
 PORT = 8888
 IMAGE_PATH = r"D:\RK3568&Orin Nano\ORIN NANO\Model Training\NEU-DET-with-yolov8-main\data\NEU-DET\test\images\crazing_271.jpg"
 
